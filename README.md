@@ -50,3 +50,9 @@ Expenses from older installations are loaded automatically. New expense and budg
 ## Expense details
 
 Tap **View expenses** on the overview to open the full-screen expense list. Browse months or switch to All time. The list and its filters scroll independently of the overview, with full descriptions, totals, and confirmed deletion. Add expense is available on both screens; Android Back or the close button returns to the overview. The overview summary scrolls on smaller displays.
+
+The overview fills available space below the summary with the selected month’s newest expenses. It shows only complete rows, adapting to screen and system text size; View expenses opens the full list.
+
+## Appearance
+
+Tap the logo with the moon/sun badge at the top right to switch between light and dark mode. Your choice is saved on this device and applies to all app screens and native dialogs. Appearance is stored separately from expenses and budgets.

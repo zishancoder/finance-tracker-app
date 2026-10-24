@@ -54,3 +54,32 @@ assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 
 assert.deepEqual(readTrackerData(JSON.stringify({ expenses, budgets })), { expenses, budgets });
 assert.throws(() => readTrackerData(JSON.stringify({ expenses, budgets: { '2026-10': 0 } })));
 console.log('Budget calculations, overspending, validation, persistence format, and old/new backups passed.');
+
+const { recentExpensesForSpace } = await import('./recentExpenses.ts');
+const recentInput = [expenses[1], expenses[0], { ...expenses[0], id: '3', title: 'Same day' }];
+assert.equal(recentExpensesForSpace(recentInput, 107, 1).items.length, 0);
+assert.deepEqual(recentExpensesForSpace(recentInput, 108, 1).items.map(x => x.id), ['1']);
+assert.deepEqual(recentExpensesForSpace(recentInput, 228, 1).items.map(x => x.id), ['1', '3', '2']);
+assert.equal(recentExpensesForSpace(recentInput, 228, 1.5).items.length, 2);
+assert.equal(recentExpensesForSpace(recentInput, 228, 0.85).items.length, 3);
+assert.equal(recentExpensesForSpace(recentInput, 0, 1).items.length, 0);
+assert.equal(recentExpensesForSpace([], 500, 1).items.length, 0);
+assert.deepEqual(recentInput.map(x => x.id), ['2', '1', '3']);
+console.log('Recent expenses fit complete rows, adapt to text size, sort newest first, and preserve stored order.');
+
+const { themes } = await import('./theme.ts');
+const luminance = (hex) => {
+  const channels = hex.slice(1).match(/../g).map(x => parseInt(x, 16) / 255).map(x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4);
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+};
+const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
+for (const theme of Object.values(themes)) {
+  for (const [foreground, background] of [
+    ['text', 'background'], ['muted', 'background'], ['text', 'surface'], ['muted', 'surface'],
+    ['placeholder', 'surface'], ['onAccent', 'accent'], ['summaryText', 'summary'], ['summaryMuted', 'summary'],
+    ['danger', 'background'], ['danger', 'summary'], ['text', 'activeTab'], ['text', 'selected'],
+  ]) assert.ok(contrast(theme[foreground], theme[background]) >= 4.5, `${foreground} on ${background} must remain readable`);
+  for (const background of Object.values(theme.categories)) assert.ok(contrast(theme.categoryText, background) >= 4.5);
+}
+assert.deepEqual(Object.keys(themes.light), Object.keys(themes.dark));
+console.log('Light and dark palettes meet text contrast checks across surfaces, buttons, budgets, errors, and categories.');

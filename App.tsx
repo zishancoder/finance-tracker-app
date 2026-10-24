@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Appearance, ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { recentExpensesForSpace } from './recentExpenses';
+import { themes } from './theme';
+import type { Theme } from './theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -9,9 +12,34 @@ import type { TrackerData, Budgets, Expense, Category } from './expenses';
 
 const STORAGE_KEY = 'finance-tracker.data.v2';
 const LEGACY_STORAGE_KEY = 'finance-tracker.expenses.v1';
-const colors: Record<Category, string> = { Food: '#F5EADD', Transport: '#E3ECF5', Shopping: '#EEE5F3', Bills: '#F5E3DE', Other: '#E8ECE8' };
+const THEME_KEY = 'finance-tracker.theme';
 
 function Tracker() {
+  const [mode, setMode] = useState<'light' | 'dark'>('light');
+  const [themeBusy, setThemeBusy] = useState(true);
+  const theme = themes[mode];
+  const s = styles[mode];
+  useEffect(() => {
+    AsyncStorage.getItem(THEME_KEY).then((saved) => {
+      if (saved === 'light' || saved === 'dark') setMode(saved);
+    }).catch(() => Alert.alert('Couldn’t load appearance', 'You can choose your preferred mode again.'))
+      .finally(() => setThemeBusy(false));
+  }, []);
+  useEffect(() => { Appearance.setColorScheme(mode); }, [mode]);
+
+  async function toggleTheme() {
+    if (themeBusy) return;
+    setThemeBusy(true);
+    const next = mode === 'light' ? 'dark' : 'light';
+    try {
+      await AsyncStorage.setItem(THEME_KEY, next);
+      setMode(next);
+    } catch { Alert.alert('Couldn’t save appearance', 'Please try again.'); }
+    finally { setThemeBusy(false); }
+  }
+
+  const { fontScale } = useWindowDimensions();
+  const [recentHeight, setRecentHeight] = useState(0);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [budgets, setBudgets] = useState<Budgets>({});
   const [budgetOpen, setBudgetOpen] = useState(false);
@@ -39,6 +67,7 @@ function Tracker() {
   const monthLabel = month.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const monthlyExpenses = expensesForMonth(expenses, month);
   const visible = period === 'month' ? monthlyExpenses : expenses;
+  const recent = recentExpensesForSpace(monthlyExpenses, recentHeight, fontScale);
   const spent = expenseTotal(monthlyExpenses);
   const monthKey = localDate(month).slice(0, 7);
   const budget = budgets[monthKey];
@@ -165,12 +194,15 @@ function Tracker() {
 
   return (
     <SafeAreaView style={s.screen}>
-      <StatusBar style="dark" />
+      <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
       <View style={s.header}>
         <View style={s.headerText}><Text style={s.eyebrow}>A LITTLE CLARITY, EVERY DAY</Text><Text accessibilityRole="header" style={s.heading}>Your expenses.</Text></View>
-        <Image source={require('./assets/finance-logo.png')} accessibilityLabel="Finance Tracker logo" style={s.logo} />
+        <Pressable accessibilityRole="button" accessibilityLabel={mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'} accessibilityHint="Saves your appearance preference" disabled={themeBusy} onPress={toggleTheme} style={s.themeToggle}>
+          <Image source={require('./assets/finance-logo.png')} accessibilityIgnoresInvertColors style={s.logo} />
+          <View style={s.themeBadge}><Text style={s.themeSymbol}>{mode === 'light' ? '☾' : '☀'}</Text></View>
+        </Pressable>
       </View>
-      {loading ? <View style={s.center}><ActivityIndicator color="#263F34" accessibilityLabel="Loading expenses" /></View> : loadError ? (
+      {loading ? <View style={s.center}><ActivityIndicator color={theme.accent} accessibilityLabel="Loading expenses" /></View> : loadError ? (
         <View style={s.center}><Text style={s.emptyTitle}>Couldn’t load your expenses</Text><Text style={s.muted}>Your saved data hasn’t been changed.</Text><Pressable style={s.retry} onPress={load}><Text style={s.link}>Try again</Text></Pressable></View>
       ) : (
         <>
@@ -182,9 +214,19 @@ function Tracker() {
             <View style={s.summaryBottom}><View style={s.dot} /><Text style={s.summaryFoot}>{monthlyExpenses.length} {monthlyExpenses.length === 1 ? 'expense' : 'expenses'} recorded</Text></View>
             <View style={s.budgetSection}>
               <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>{budget ? `Budget ${money(budget)}` : 'Set monthly budget'}</Text><Text style={s.budgetEdit}>{budget ? 'Edit' : '+'}</Text></Pressable>
-              {usage && <><View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage.percent, 100), text: `${usage.percent}% used` }} style={s.progressTrack}><View style={[s.progressFill, { width: `${usage.progress * 100}%`, backgroundColor: usage.remaining < 0 ? '#A13D32' : '#476740' }]} /></View><View style={s.budgetStats}><Text style={s.budgetStat}>{usage.percent}% used</Text><Text style={[s.budgetRemaining, usage.remaining < 0 && s.overBudget]}>{usage.remaining < 0 ? `${money(-usage.remaining)} over budget` : `${money(usage.remaining)} left`}</Text></View></>}
+              {usage && <><View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage.percent, 100), text: `${usage.percent}% used` }} style={s.progressTrack}><View style={[s.progressFill, { width: `${usage.progress * 100}%`, backgroundColor: usage.remaining < 0 ? theme.danger : theme.progress }]} /></View><View style={s.budgetStats}><Text style={s.budgetStat}>{usage.percent}% used</Text><Text style={[s.budgetRemaining, usage.remaining < 0 && s.overBudget]}>{usage.remaining < 0 ? `${money(-usage.remaining)} over budget` : `${money(usage.remaining)} left`}</Text></View></>}
             </View>
             {!isCurrentMonth && <Pressable accessibilityRole="button" onPress={() => setMonth(currentMonth)} style={s.currentMonthButton}><Text style={s.currentMonthText}>Back to this month</Text></Pressable>}
+          </View>
+          <View style={s.recentSpace} onLayout={({ nativeEvent }) => setRecentHeight(nativeEvent.layout.height)}>
+            {!!recent.items.length && <>
+              <View style={[s.recentHeader, { height: recent.headerHeight }]}><Text accessibilityRole="header" style={s.sectionTitle}>Recent expenses</Text></View>
+              {recent.items.map((item) => <View key={item.id} style={[s.recentRow, { height: recent.rowHeight }]}>
+                <View style={[s.recentIcon, { backgroundColor: theme.categories[item.category] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
+                <View style={s.rowBody}><Text numberOfLines={1} style={s.recentTitle}>{item.title}</Text><Text numberOfLines={1} style={s.recentMeta}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text></View>
+                <Text numberOfLines={1} adjustsFontSizeToFit style={s.recentAmount}>{money(item.cents)}</Text>
+              </View>)}
+            </>}
           </View>
           </ScrollView>
           <View style={s.footer}><Pressable disabled={saving || transferring} accessibilityRole="button" onPress={startExpense} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.plus}>+</Text><Text style={s.primaryText}>Add expense</Text></Pressable><View style={s.footerLinks}><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => { setPeriod('month'); setDetailsOpen(true); }} style={[s.backupLink, s.footerAction]}><Text style={s.footerLinkText}>View expenses</Text></Pressable><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => setBackupOpen(true)} style={[s.backupLink, s.footerAction]}><Text style={s.footerLinkText}>Data & backup</Text></Pressable></View></View>
@@ -202,7 +244,7 @@ function Tracker() {
             </View>}
             ListEmptyComponent={<View style={s.empty}><View style={s.emptyIcon}><Text style={s.emptyIconText}>↗</Text></View><Text style={s.emptyTitle}>{period === 'month' ? 'No expenses this month.' : 'A fresh start.'}</Text><Text style={s.emptyCopy}>{period === 'month' && !isCurrentMonth ? `Nothing recorded for ${monthLabel}.` : 'Add an expense to start tracking your spending.'}</Text></View>}
             renderItem={({ item }) => <View style={s.row}>
-              <View style={[s.categoryIcon, { backgroundColor: colors[item.category] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
+              <View style={[s.categoryIcon, { backgroundColor: theme.categories[item.category] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
               <View style={s.rowBody}><Text style={s.rowTitle}>{item.title}</Text><View style={s.expenseMeta}><Text style={s.rowSubtitle}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text adjustsFontSizeToFit numberOfLines={1} style={s.rowAmount}>{money(item.cents)}</Text></View></View>
               <Pressable disabled={saving} accessibilityRole="button" accessibilityLabel={`Delete ${item.title}`} hitSlop={4} style={s.delete} onPress={() => remove(item)}><Text style={s.deleteText}>×</Text></Pressable>
             </View>}
@@ -215,10 +257,10 @@ function Tracker() {
           <View style={s.formHeader}><Text style={s.sectionTitle}>Monthly budget</Text><Pressable accessibilityRole="button" accessibilityLabel="Close budget form" disabled={saving} onPress={() => setBudgetOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
             <Text style={s.emptyTitle}>{monthLabel}</Text><Text style={s.backupCopy}>Choose how much you plan to spend. This budget applies only to this month.</Text>
-            <Text style={s.label}>Budget in rupees</Text><TextInput accessibilityLabel="Monthly budget amount" value={budgetAmount} onChangeText={setBudgetAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#78836F" style={s.amountInput} maxLength={11} autoFocus />
+            <Text style={s.label}>Budget in rupees</Text><TextInput accessibilityLabel="Monthly budget amount" value={budgetAmount} onChangeText={setBudgetAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={theme.placeholder} style={s.amountInput} maxLength={11} autoFocus />
             <Text style={s.backupCopy}>Already spent: {money(spent)}</Text>
             {!!budget && <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget(true)} style={s.backupLink}><Text style={s.overBudget}>Remove this month’s budget</Text></Pressable>}
-          <View style={s.inlineFormFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
+          <View style={s.inlineFormFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color={theme.onAccent} /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
           </ScrollView>
         </KeyboardAvoidingView></SafeAreaView>
       </Modal>
@@ -230,7 +272,7 @@ function Tracker() {
             <Text style={s.backupCopy}>Back up your expenses and monthly budgets as a JSON file, or restore a backup from another device.</Text>
             <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses and {Object.keys(budgets).length} monthly budgets. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
             <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). Old expense-only backups also work. New expenses and budgets for new months are added; existing budget amounts are kept.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
-            {transferring && <ActivityIndicator color="#263F34" accessibilityLabel="Working with backup" />}
+            {transferring && <ActivityIndicator color={theme.accent} accessibilityLabel="Working with backup" />}
             <Text style={s.backupCopy}>Backup files contain your expense details in plain text. Keep them somewhere private. Your data stays on this device unless you export it.</Text>
           </ScrollView>
         </SafeAreaView>
@@ -240,11 +282,11 @@ function Tracker() {
           <View style={s.formHeader}><Text style={s.sectionTitle}>New expense</Text><Pressable accessibilityRole="button" accessibilityLabel="Close form" disabled={saving} onPress={() => setOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
             <Text style={s.eyebrow}>HOW MUCH DID YOU SPEND?</Text>
-            <View style={s.amountEntry}><Text style={s.currency}>₹</Text><TextInput accessibilityLabel="Amount in rupees" value={amount} onChangeText={setAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#8A9485" style={s.amountInput} maxLength={11} autoFocus /></View>
-            <Text style={s.label}>Description</Text><TextInput accessibilityLabel="Expense description" style={s.input} placeholder="What was it for?" placeholderTextColor="#78836F" value={title} onChangeText={setTitle} maxLength={80} editable={!saving} />
+            <View style={s.amountEntry}><Text style={s.currency}>₹</Text><TextInput accessibilityLabel="Amount in rupees" value={amount} onChangeText={setAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={theme.placeholder} style={s.amountInput} maxLength={11} autoFocus /></View>
+            <Text style={s.label}>Description</Text><TextInput accessibilityLabel="Expense description" style={s.input} placeholder="What was it for?" placeholderTextColor={theme.placeholder} value={title} onChangeText={setTitle} maxLength={80} editable={!saving} />
             <Text style={s.label}>Category</Text><View style={s.categoryChoices}>{categories.map((value) => <Pressable key={value} disabled={saving} accessibilityRole="radio" accessibilityState={{ checked: value === category }} onPress={() => setCategory(value)} style={[s.chip, category === value && s.chipActive]}><Text style={[s.chipText, category === value && s.chipTextActive]}>{value}</Text></Pressable>)}</View>
-            <Text style={[s.label, { marginTop: 28 }]}>Date · YYYY-MM-DD</Text><TextInput accessibilityLabel="Expense date" placeholder="YYYY-MM-DD" placeholderTextColor="#78836F" value={expenseDate} onChangeText={setExpenseDate} editable={!saving} style={s.input} maxLength={10} autoCorrect={false} autoCapitalize="none" />
-          <View style={s.inlineFormFooter}>{!!error && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{error}</Text>}<Pressable disabled={saving} accessibilityRole="button" onPress={add} style={({ pressed }) => [s.primary, pressed && s.pressed, saving && s.disabled]}>{saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={s.primaryText}>Save expense</Text>}</Pressable></View>
+            <Text style={[s.label, { marginTop: 28 }]}>Date · YYYY-MM-DD</Text><TextInput accessibilityLabel="Expense date" placeholder="YYYY-MM-DD" placeholderTextColor={theme.placeholder} value={expenseDate} onChangeText={setExpenseDate} editable={!saving} style={s.input} maxLength={10} autoCorrect={false} autoCapitalize="none" />
+          <View style={s.inlineFormFooter}>{!!error && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{error}</Text>}<Pressable disabled={saving} accessibilityRole="button" onPress={add} style={({ pressed }) => [s.primary, pressed && s.pressed, saving && s.disabled]}>{saving ? <ActivityIndicator color={theme.onAccent} /> : <Text style={s.primaryText}>Save expense</Text>}</Pressable></View>
           </ScrollView>
         </KeyboardAvoidingView></SafeAreaView>
       </Modal>
@@ -254,26 +296,38 @@ function Tracker() {
 
 export default function App() { return <SafeAreaProvider><Tracker /></SafeAreaProvider>; }
 
-const s = StyleSheet.create({
+const createStyles = (theme: Theme) => StyleSheet.create({
+  themeToggle: { width: 44, height: 44 },
+  themeBadge: { position: 'absolute', bottom: -5, right: -5, width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border },
+  themeSymbol: { fontSize: 17, color: theme.text },
   inlineFormFooter: { paddingTop: 12, paddingBottom: 8 },
   expenseMeta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 6 },
-  headerText: { flex: 1, minWidth: 0 }, footerAction: { flex: 1 }, footerLinkText: { color: '#263F34', fontWeight: '600', textAlign: 'center' },
-  overviewContent: { paddingBottom: 24 }, footerLinks: { flexDirection: 'row', justifyContent: 'space-between', gap: 16 }, detailsControls: { paddingTop: 4, paddingBottom: 12 }, detailsTabs: { alignItems: 'flex-start', marginBottom: 22 }, detailsTotalRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingTop: 18, paddingBottom: 8 }, detailsTotal: { color: '#253C2A', fontSize: 28, fontWeight: '600', flexShrink: 1 },
-  spentLabel: { color: '#4F624A', fontSize: 12, marginTop: 12 }, budgetSection: { borderTopWidth: 1, borderTopColor: '#CDD8C0', marginTop: 16, paddingTop: 4 }, budgetButton: { minHeight: 44, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, budgetLabel: { flex: 1, fontSize: 13, color: '#3A5433', fontWeight: '500' }, budgetEdit: { color: '#3A5433', fontWeight: '600', fontSize: 13 }, progressTrack: { height: 6, borderRadius: 3, backgroundColor: '#CDD8C0', overflow: 'hidden', marginTop: 3 }, progressFill: { height: 6, borderRadius: 3 }, budgetStats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 11 }, budgetStat: { fontSize: 12, color: '#52654A' }, budgetRemaining: { fontSize: 13, color: '#30492B', fontWeight: '600' }, overBudget: { color: '#A13D32', fontWeight: '600' },
-  backupLink: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, backupCopy: { color: '#66765C', fontSize: 14, lineHeight: 22, marginVertical: 14 }, backupCard: { borderWidth: 1, borderColor: '#DDE3D6', borderRadius: 20, padding: 20, marginVertical: 10 },
-  flex: { flex: 1 }, screen: { flex: 1, backgroundColor: '#FAFBF8' },
+  headerText: { flex: 1, minWidth: 0 }, footerAction: { flex: 1 }, footerLinkText: { color: theme.accent, fontWeight: '600', textAlign: 'center' },
+  recentSpace: { flex: 1, minHeight: 0, marginHorizontal: 24, overflow: 'hidden' },
+  recentHeader: { justifyContent: 'center', paddingTop: 12 },
+  recentRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: 1, borderBottomColor: theme.divider },
+  recentIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  recentTitle: { fontSize: 15, lineHeight: 22, fontWeight: '500', color: theme.text },
+  recentMeta: { fontSize: 11, lineHeight: 18, color: theme.muted },
+  recentAmount: { maxWidth: '40%', fontSize: 14, fontWeight: '600', color: theme.text },
+  overviewContent: { flexGrow: 1, paddingBottom: 12 }, footerLinks: { flexDirection: 'row', justifyContent: 'space-between', gap: 16 }, detailsControls: { paddingTop: 4, paddingBottom: 12 }, detailsTabs: { alignItems: 'flex-start', marginBottom: 22 }, detailsTotalRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingTop: 18, paddingBottom: 8 }, detailsTotal: { color: theme.summaryText, fontSize: 28, fontWeight: '600', flexShrink: 1 },
+  spentLabel: { color: theme.summaryMuted, fontSize: 12, marginTop: 12 }, budgetSection: { borderTopWidth: 1, borderTopColor: theme.summaryBorder, marginTop: 16, paddingTop: 4 }, budgetButton: { minHeight: 44, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, budgetLabel: { flex: 1, fontSize: 13, color: theme.summaryText, fontWeight: '500' }, budgetEdit: { color: theme.summaryText, fontWeight: '600', fontSize: 13 }, progressTrack: { height: 6, borderRadius: 3, backgroundColor: theme.summaryBorder, overflow: 'hidden', marginTop: 3 }, progressFill: { height: 6, borderRadius: 3 }, budgetStats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 11 }, budgetStat: { fontSize: 12, color: theme.summaryMuted }, budgetRemaining: { fontSize: 13, color: theme.summaryText, fontWeight: '600' }, overBudget: { color: theme.danger, fontWeight: '600' },
+  backupLink: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, backupCopy: { color: theme.muted, fontSize: 14, lineHeight: 22, marginVertical: 14 }, backupCard: { borderWidth: 1, borderColor: theme.border, borderRadius: 20, padding: 20, marginVertical: 10 },
+  flex: { flex: 1 }, screen: { flex: 1, backgroundColor: theme.background },
   header: { paddingHorizontal: 24, paddingTop: 24, paddingBottom: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 1.5, color: '#626E5C' }, heading: { fontSize: 32, fontWeight: '600', letterSpacing: -1.2, color: '#202B24', marginTop: 9 },
+  eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 1.5, color: theme.muted }, heading: { fontSize: 32, fontWeight: '600', letterSpacing: -1.2, color: theme.text, marginTop: 9 },
   logo: { width: 44, height: 44, borderRadius: 14 },
-  summary: { backgroundColor: '#E9EFDE', marginHorizontal: 24, padding: 24, borderRadius: 24 }, summaryLabel: { color: '#4F624A', fontSize: 14 },
-  monthNavigation: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: -8, marginHorizontal: 0 }, monthLabel: { flex: 1, textAlign: 'center', color: '#4F624A', fontSize: 15, fontWeight: '500' }, monthArrow: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22, backgroundColor: '#DDE7CE' }, monthArrowText: { color: '#334E2D', fontSize: 29, lineHeight: 32 }, currentMonthButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 8 }, currentMonthText: { color: '#38562E', fontSize: 12, fontWeight: '600', textDecorationLine: 'underline' },
-  total: { color: '#253C2A', fontSize: 44, fontWeight: '600', letterSpacing: -1.8, marginTop: 14, marginBottom: 25 },
-  summaryBottom: { flexDirection: 'row', alignItems: 'center', gap: 7 }, dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#708760' }, summaryFoot: { color: '#54664F', fontSize: 12 },
-  sectionTitle: { fontSize: 19, fontWeight: '600', color: '#202B24' },
-  tabs: { flexDirection: 'row', backgroundColor: '#EFF1EC', borderRadius: 20, padding: 3 }, tab: { paddingHorizontal: 12, minHeight: 44, justifyContent: 'center', borderRadius: 18 }, tabActive: { backgroundColor: '#FFFFFF' }, tabText: { fontSize: 12, color: '#626C5D' }, tabTextActive: { color: '#273F2E', fontWeight: '600' },
-  list: { paddingHorizontal: 24, paddingBottom: 12 }, emptyList: { flexGrow: 1 }, row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 17, borderBottomWidth: 1, borderBottomColor: '#EAEDE5', gap: 10 },
-  categoryIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, categoryLetter: { fontSize: 16, fontWeight: '600', color: '#4D594E' }, rowBody: { flex: 1 }, rowTitle: { fontSize: 15, fontWeight: '500', color: '#26322A' }, rowSubtitle: { fontSize: 11, color: '#687461' }, rowAmount: { fontSize: 14, fontWeight: '600', color: '#29362E', flexShrink: 1 }, delete: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }, deleteText: { fontSize: 23, color: '#697560' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 }, empty: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 30 }, emptyIcon: { width: 62, height: 62, backgroundColor: '#F0F3EB', borderRadius: 31, justifyContent: 'center', alignItems: 'center', marginBottom: 19 }, emptyIconText: { fontSize: 27, color: '#6A7D5C' }, emptyTitle: { fontSize: 20, fontWeight: '500', color: '#3E4C3F' }, emptyCopy: { color: '#68755F', fontSize: 14, lineHeight: 22, textAlign: 'center', marginTop: 9 },
-  footer: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16 }, primary: { backgroundColor: '#263F34', borderRadius: 18, minHeight: 58, paddingVertical: 16, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 }, primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' }, plus: { color: '#FFFFFF', fontSize: 25, lineHeight: 26, fontWeight: '300' }, pressed: { opacity: 0.8 }, disabled: { opacity: 0.6 }, localNote: { textAlign: 'center', color: '#697560', fontSize: 10, marginTop: 15 },
-  formHeader: { paddingHorizontal: 24, paddingTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, close: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EEF1E9', borderRadius: 22 }, closeText: { fontSize: 27, color: '#52614F' }, form: { paddingHorizontal: 28, paddingTop: 44, paddingBottom: 28 }, amountEntry: { flexDirection: 'row', alignItems: 'center', marginTop: 14, marginBottom: 36 }, currency: { fontSize: 38, color: '#74816C', marginRight: 10 }, amountInput: { flex: 1, color: '#263F34', fontSize: 48, fontWeight: '500', paddingVertical: 8 }, label: { fontSize: 13, fontWeight: '600', color: '#485544', marginBottom: 12 }, input: { backgroundColor: '#F0F3EB', borderRadius: 14, paddingHorizontal: 17, paddingVertical: 17, fontSize: 16, color: '#263F34', marginBottom: 30 }, categoryChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, chip: { borderWidth: 1, borderColor: '#DDE3D6', borderRadius: 24, minHeight: 44, paddingHorizontal: 17, justifyContent: 'center' }, chipActive: { backgroundColor: '#E4ECD8', borderColor: '#9DAF8F' }, chipText: { color: '#606F57', fontSize: 13 }, chipTextActive: { color: '#2F492D', fontWeight: '600' }, dateNote: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#E4E9DD', marginTop: 32, paddingTop: 23 }, muted: { color: '#66765C', fontSize: 13 }, dateText: { color: '#4D5C46', fontSize: 13 }, formFooter: { padding: 24 }, error: { marginTop: 24, color: '#A13D32', lineHeight: 21, fontSize: 13 }, retry: { padding: 16 }, link: { color: '#263F34', fontWeight: '600' },
+  summary: { backgroundColor: theme.summary, marginHorizontal: 24, padding: 24, borderRadius: 24 }, summaryLabel: { color: theme.summaryMuted, fontSize: 14 },
+  monthNavigation: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: -8, marginHorizontal: 0 }, monthLabel: { flex: 1, textAlign: 'center', color: theme.summaryMuted, fontSize: 15, fontWeight: '500' }, monthArrow: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22, backgroundColor: theme.summaryControl }, monthArrowText: { color: theme.summaryText, fontSize: 29, lineHeight: 32 }, currentMonthButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 8 }, currentMonthText: { color: theme.link, fontSize: 12, fontWeight: '600', textDecorationLine: 'underline' },
+  total: { color: theme.summaryText, fontSize: 44, fontWeight: '600', letterSpacing: -1.8, marginTop: 14, marginBottom: 25 },
+  summaryBottom: { flexDirection: 'row', alignItems: 'center', gap: 7 }, dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: theme.progress }, summaryFoot: { color: theme.summaryMuted, fontSize: 12 },
+  sectionTitle: { fontSize: 19, fontWeight: '600', color: theme.text },
+  tabs: { flexDirection: 'row', backgroundColor: theme.surface, borderRadius: 20, padding: 3 }, tab: { paddingHorizontal: 12, minHeight: 44, justifyContent: 'center', borderRadius: 18 }, tabActive: { backgroundColor: theme.activeTab }, tabText: { fontSize: 12, color: theme.muted }, tabTextActive: { color: theme.text, fontWeight: '600' },
+  list: { paddingHorizontal: 24, paddingBottom: 12 }, emptyList: { flexGrow: 1 }, row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 17, borderBottomWidth: 1, borderBottomColor: theme.divider, gap: 10 },
+  categoryIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, categoryLetter: { fontSize: 16, fontWeight: '600', color: theme.categoryText }, rowBody: { flex: 1 }, rowTitle: { fontSize: 15, fontWeight: '500', color: theme.text }, rowSubtitle: { fontSize: 11, color: theme.muted }, rowAmount: { fontSize: 14, fontWeight: '600', color: theme.text, flexShrink: 1 }, delete: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }, deleteText: { fontSize: 23, color: theme.muted },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 }, empty: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 30 }, emptyIcon: { width: 62, height: 62, backgroundColor: theme.surface, borderRadius: 31, justifyContent: 'center', alignItems: 'center', marginBottom: 19 }, emptyIconText: { fontSize: 27, color: theme.muted }, emptyTitle: { fontSize: 20, fontWeight: '500', color: theme.text }, emptyCopy: { color: theme.muted, fontSize: 14, lineHeight: 22, textAlign: 'center', marginTop: 9 },
+  footer: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16 }, primary: { backgroundColor: theme.accent, borderRadius: 18, minHeight: 58, paddingVertical: 16, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 }, primaryText: { color: theme.onAccent, fontSize: 16, fontWeight: '600' }, plus: { color: theme.onAccent, fontSize: 25, lineHeight: 26, fontWeight: '300' }, pressed: { opacity: 0.8 }, disabled: { opacity: 0.6 }, localNote: { textAlign: 'center', color: theme.muted, fontSize: 10, marginTop: 15 },
+  formHeader: { paddingHorizontal: 24, paddingTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, close: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surface, borderRadius: 22 }, closeText: { fontSize: 27, color: theme.muted }, form: { paddingHorizontal: 28, paddingTop: 44, paddingBottom: 28 }, amountEntry: { flexDirection: 'row', alignItems: 'center', marginTop: 14, marginBottom: 36 }, currency: { fontSize: 38, color: theme.muted, marginRight: 10 }, amountInput: { flex: 1, color: theme.accent, fontSize: 48, fontWeight: '500', paddingVertical: 8 }, label: { fontSize: 13, fontWeight: '600', color: theme.text, marginBottom: 12 }, input: { backgroundColor: theme.surface, borderRadius: 14, paddingHorizontal: 17, paddingVertical: 17, fontSize: 16, color: theme.accent, marginBottom: 30 }, categoryChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, chip: { borderWidth: 1, borderColor: theme.border, borderRadius: 24, minHeight: 44, paddingHorizontal: 17, justifyContent: 'center' }, chipActive: { backgroundColor: theme.selected, borderColor: theme.selectedBorder }, chipText: { color: theme.muted, fontSize: 13 }, chipTextActive: { color: theme.text, fontWeight: '600' }, dateNote: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: theme.border, marginTop: 32, paddingTop: 23 }, muted: { color: theme.muted, fontSize: 13 }, dateText: { color: theme.muted, fontSize: 13 }, formFooter: { padding: 24 }, error: { marginTop: 24, color: theme.danger, lineHeight: 21, fontSize: 13 }, retry: { padding: 16 }, link: { color: theme.accent, fontWeight: '600' },
 });
+
+const styles = { light: createStyles(themes.light), dark: createStyles(themes.dark) };

@@ -49,4 +49,4 @@ Expenses from older installations are loaded automatically. New expense and budg
 
 ## Expense details
 
-Tap **View expenses** on the overview to open the full-screen expense list. Browse months or switch to All time. The list and its filters scroll independently of the overview, with full descriptions, totals, and confirmed deletion. Add expense is available on both screens; Android Back or the back arrow returns to the overview. The overview summary scrolls on smaller displays.
+Tap **View expenses** on the overview to open the full-screen expense list. Browse months or switch to All time. The list and its filters scroll independently of the overview, with full descriptions, totals, and confirmed deletion. Add expense is available on both screens; Android Back or the close button returns to the overview. The overview summary scrolls on smaller displays.

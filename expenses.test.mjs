@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { parseAmount, readExpenses, expenseTotal, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
+import { localDate, parseExpenseDate, parseAmount, readExpenses, expenseTotal, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
 assert.equal(parseAmount('12.30'), 1230);
 assert.equal(parseAmount('0.01'), 1);
 for (const value of ['0', '-5', '1.001', '1e3', '', 'Infinity', '1,000', '100000000']) assert.equal(parseAmount(value), null, value);
@@ -34,3 +34,8 @@ for (const change of [{ version: 2 }, { currency: 'USD' }, { expenses: [{ ...exp
 assert.throws(() => importBackup(exportBackup([{ ...expenses[0], cents: 999 }]), expenses));
 assert.equal(expenses[0].cents, 1230);
 console.log('Backup round-trip, merge, duplicate handling, conflicts, size limits, and invalid-file checks passed.');
+
+assert.equal(parseExpenseDate('2026-02-30'), null);
+assert.equal(parseExpenseDate('2026-13-01'), null);
+assert.equal(localDate(parseExpenseDate('2024-02-29')), '2024-02-29');
+assert.equal(parseExpenseDate('24/10/2026'), null);

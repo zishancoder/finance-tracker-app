@@ -4,9 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Directory, File } from 'expo-file-system';
-import { extractTextFromImage, isSupported } from 'expo-text-extractor';
-import { extractTransaction, localDate, parseExpenseDate } from './screenshot';
-import { categories, expenseTotal, money, parseAmount, readExpenses, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
+import { localDate, parseExpenseDate, categories, expenseTotal, money, parseAmount, readExpenses, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
 import type { Expense, Category } from './expenses';
 
 const STORAGE_KEY = 'finance-tracker.expenses.v1';
@@ -24,12 +22,6 @@ function Tracker() {
   const [backupOpen, setBackupOpen] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const transferBusy = useRef(false);
-  const scanBusy = useRef(false);
-  const [scanning, setScanning] = useState(false);
-  const [scanPreview, setScanPreview] = useState('');
-  const [scanNotice, setScanNotice] = useState('');
-  const [recognizedText, setRecognizedText] = useState('');
-  const [showRecognizedText, setShowRecognizedText] = useState(false);
   const [expenseDate, setExpenseDate] = useState(() => localDate());
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
@@ -71,10 +63,6 @@ function Tracker() {
     if (!title.trim()) { setError('Add a short description for this expense.'); return; }
     const date = parseExpenseDate(expenseDate);
     if (!date || expenseDate > localDate()) { setError('Enter a valid date as YYYY-MM-DD, today or earlier.'); return; }
-    if (scanPreview && expenses.some((item) => item.cents === cents && item.title.trim().toLowerCase() === title.trim().toLowerCase() && localDate(new Date(item.date)) === expenseDate)) {
-      const confirmed = await new Promise<boolean>((resolve) => Alert.alert('Possible duplicate', 'An expense with the same description, amount, and date already exists. Save another?', [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Save another', onPress: () => resolve(true) }], { cancelable: true, onDismiss: () => resolve(false) }));
-      if (!confirmed) return;
-    }
     const item: Expense = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, title: title.trim(), cents, category, date: date.toISOString() };
     if (await save([item, ...expenses])) {
       setMonth(shiftMonth(date, 0));
@@ -130,38 +118,6 @@ function Tracker() {
     } finally { transferBusy.current = false; setTransferring(false); }
   }
 
-  async function scanScreenshot() {
-    if (scanBusy.current || busy.current || transferBusy.current) return;
-    scanBusy.current = true;
-    setScanning(true);
-    try {
-      if (!isSupported) throw new Error('Screenshot reading is not available on this device. You can still add an expense manually.');
-      const picked = await File.pickFileAsync(undefined, 'image/*');
-      const file = Array.isArray(picked) ? picked[0] : picked;
-      if (!file || file.size === null || file.size > 20 * 1024 * 1024) throw new Error('Choose a screenshot smaller than 20 MB.');
-      const size = await Image.getSize(file.uri);
-      if (size.width * size.height > 25000000) throw new Error('Choose a screenshot of one transaction rather than a long transaction history.');
-      const blocks = await extractTextFromImage(file.uri);
-      const text = blocks.join('\n');
-      if (!text.trim()) throw new Error('No readable text was found. Choose a clear screenshot of a completed payment.');
-      const result = extractTransaction(text);
-      if (result.blockedReason) { Alert.alert('Check this transaction', result.blockedReason); return; }
-      setAmount(result.amount);
-      setTitle(result.title);
-      setExpenseDate(result.date);
-      setCategory('Other');
-      setScanPreview(file.uri);
-      setRecognizedText(text);
-      setShowRecognizedText(false);
-      setScanNotice(result.unsupportedCurrency ? 'This app tracks INR. Confirm the rupee amount before saving.' : result.ambiguousAmount ? 'Several amounts were found. Enter the amount paid, then review the other details.' : 'Review every field before saving. Fill in any details the screenshot reader missed.');
-      setError('');
-      setOpen(true);
-    } catch (failure) {
-      const code = failure && typeof failure === 'object' && 'code' in failure ? failure.code : '';
-      if (code !== 'ERR_PICKER_CANCELLED' && code !== 'ERR_PICKER_CANCELED') Alert.alert('Couldn’t read screenshot', failure instanceof Error ? failure.message : 'Please try another image.');
-    } finally { scanBusy.current = false; setScanning(false); }
-  }
-
   return (
     <SafeAreaView style={s.screen}>
       <StatusBar style="dark" />
@@ -193,10 +149,10 @@ function Tracker() {
               <View style={[s.categoryIcon, { backgroundColor: colors[item.category] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
               <View style={s.rowBody}><Text numberOfLines={1} style={s.rowTitle}>{item.title}</Text><Text style={s.rowSubtitle}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text></View>
               <Text style={s.rowAmount}>{money(item.cents)}</Text>
-              <Pressable disabled={saving || scanning} accessibilityRole="button" accessibilityLabel={`Delete ${item.title}`} hitSlop={4} style={s.delete} onPress={() => remove(item)}><Text style={s.deleteText}>×</Text></Pressable>
+              <Pressable disabled={saving} accessibilityRole="button" accessibilityLabel={`Delete ${item.title}`} hitSlop={4} style={s.delete} onPress={() => remove(item)}><Text style={s.deleteText}>×</Text></Pressable>
             </View>}
           />
-          <View style={s.footer}><Pressable disabled={saving || transferring || scanning} accessibilityRole="button" onPress={() => { setTitle(''); setAmount(''); setCategory('Food'); setExpenseDate(localDate()); setScanPreview(''); setScanNotice(''); setError(''); setOpen(true); }} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.plus}>+</Text><Text style={s.primaryText}>Add expense</Text></Pressable><View style={s.footerLinks}><Pressable accessibilityRole="button" disabled={saving || transferring || scanning} onPress={scanScreenshot} style={s.backupLink}>{scanning ? <ActivityIndicator accessibilityLabel="Reading screenshot" color="#263F34" /> : <Text style={s.link}>Scan screenshot</Text>}</Pressable><Pressable accessibilityRole="button" disabled={saving || transferring || scanning} onPress={() => setBackupOpen(true)} style={s.backupLink}><Text style={s.link}>Data & backup</Text></Pressable></View></View>
+          <View style={s.footer}><Pressable disabled={saving || transferring} accessibilityRole="button" onPress={() => { setTitle(''); setAmount(''); setCategory('Food'); setExpenseDate(localDate()); setError(''); setOpen(true); }} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.plus}>+</Text><Text style={s.primaryText}>Add expense</Text></Pressable><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => setBackupOpen(true)} style={s.backupLink}><Text style={s.link}>Data & backup</Text></Pressable></View>
         </>
       )}
       <Modal visible={backupOpen} animationType="slide" onRequestClose={() => { if (!transferring) setBackupOpen(false); }}>
@@ -214,11 +170,10 @@ function Tracker() {
       </Modal>
       <Modal visible={open} animationType="slide" onRequestClose={() => { if (!saving) setOpen(false); }}>
         <SafeAreaView style={s.screen}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-          <View style={s.formHeader}><Text style={s.sectionTitle}>{scanPreview ? 'Review screenshot' : 'New expense'}</Text><Pressable accessibilityRole="button" accessibilityLabel="Close form" disabled={saving} onPress={() => setOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+          <View style={s.formHeader}><Text style={s.sectionTitle}>New expense</Text><Pressable accessibilityRole="button" accessibilityLabel="Close form" disabled={saving} onPress={() => setOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
-            {!!scanPreview && <View style={s.scanReview}><Image source={{ uri: scanPreview }} accessibilityLabel="Selected transaction screenshot" resizeMode="contain" style={s.scanImage} /><Text style={s.backupCopy}>{scanNotice}</Text><Text style={s.muted}>Screenshot text is read on this device. Nothing is saved until you confirm.</Text><Pressable accessibilityRole="button" accessibilityState={{ expanded: showRecognizedText }} onPress={() => setShowRecognizedText((value) => !value)} style={s.recognizedButton}><Text style={s.link}>{showRecognizedText ? 'Hide recognized text' : 'Show recognized text'}</Text></Pressable>{showRecognizedText && <Text selectable style={s.recognizedText}>{recognizedText}</Text>}</View>}
             <Text style={s.eyebrow}>HOW MUCH DID YOU SPEND?</Text>
-            <View style={s.amountEntry}><Text style={s.currency}>₹</Text><TextInput accessibilityLabel="Amount in rupees" value={amount} onChangeText={setAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#8A9485" style={s.amountInput} maxLength={11} autoFocus={!scanPreview} /></View>
+            <View style={s.amountEntry}><Text style={s.currency}>₹</Text><TextInput accessibilityLabel="Amount in rupees" value={amount} onChangeText={setAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#8A9485" style={s.amountInput} maxLength={11} autoFocus /></View>
             <Text style={s.label}>Description</Text><TextInput accessibilityLabel="Expense description" style={s.input} placeholder="What was it for?" placeholderTextColor="#78836F" value={title} onChangeText={setTitle} maxLength={80} editable={!saving} />
             <Text style={s.label}>Category</Text><View style={s.categoryChoices}>{categories.map((value) => <Pressable key={value} disabled={saving} accessibilityRole="radio" accessibilityState={{ checked: value === category }} onPress={() => setCategory(value)} style={[s.chip, category === value && s.chipActive]}><Text style={[s.chipText, category === value && s.chipTextActive]}>{value}</Text></Pressable>)}</View>
             <Text style={[s.label, { marginTop: 28 }]}>Date · YYYY-MM-DD</Text><TextInput accessibilityLabel="Expense date" placeholder="YYYY-MM-DD" placeholderTextColor="#78836F" value={expenseDate} onChangeText={setExpenseDate} editable={!saving} style={s.input} maxLength={10} autoCorrect={false} autoCapitalize="none" />
@@ -233,8 +188,6 @@ function Tracker() {
 export default function App() { return <SafeAreaProvider><Tracker /></SafeAreaProvider>; }
 
 const s = StyleSheet.create({
-  recognizedButton: { minHeight: 44, justifyContent: 'center', marginTop: 8 }, recognizedText: { fontSize: 13, lineHeight: 21, color: '#4D5C46', padding: 14, backgroundColor: '#EDF1E7', borderRadius: 12 },
-  footerLinks: { flexDirection: 'row', justifyContent: 'space-between', gap: 16 }, scanReview: { marginBottom: 30 }, scanImage: { width: '100%', height: 170, backgroundColor: '#EDF1E7', borderRadius: 16 },
   backupLink: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, backupCopy: { color: '#66765C', fontSize: 14, lineHeight: 22, marginVertical: 14 }, backupCard: { borderWidth: 1, borderColor: '#DDE3D6', borderRadius: 20, padding: 20, marginVertical: 10 },
   flex: { flex: 1 }, screen: { flex: 1, backgroundColor: '#FAFBF8' },
   header: { paddingHorizontal: 24, paddingTop: 24, paddingBottom: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },

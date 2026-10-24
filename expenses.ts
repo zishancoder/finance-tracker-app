@@ -1,3 +1,14 @@
+export function localDate(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+export function parseExpenseDate(value: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day, 12);
+  return year >= 1970 && localDate(date) === value ? date : null;
+}
+
 export const categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Other'] as const;
 export type Category = (typeof categories)[number];
 export type Expense = { id: string; title: string; cents: number; category: Category; date: string };

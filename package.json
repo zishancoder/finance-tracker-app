@@ -7,7 +7,6 @@
     "expo": "~56.0.3",
     "expo-file-system": "~56.0.11",
     "expo-status-bar": "~56.0.4",
-    "expo-text-extractor": "^2.0.0",
     "react": "19.2.3",
     "react-native": "0.85.3",
     "react-native-safe-area-context": "~5.7.0"
@@ -21,7 +20,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "test": "node --experimental-strip-types expenses.test.mjs && node --experimental-strip-types screenshot.test.mjs"
+    "test": "node --experimental-strip-types expenses.test.mjs"
   },
   "private": true
 }

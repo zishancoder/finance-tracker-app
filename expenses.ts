@@ -12,6 +12,26 @@ export function parseExpenseDate(value: string): Date | null {
 export const categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Other'] as const;
 export type Category = (typeof categories)[number];
 export type Expense = { id: string; title: string; cents: number; category: Category; date: string };
+export type Budgets = Record<string, number>;
+export type TrackerData = { expenses: Expense[]; budgets: Budgets };
+
+export function readBudgets(value: unknown): Budgets {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid saved budgets');
+  const entries = Object.entries(value);
+  if (!entries.every(([month, amount]) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && Number.isSafeInteger(amount) && amount > 0)) throw new Error('Invalid saved budgets');
+  return Object.fromEntries(entries);
+}
+
+export function readTrackerData(text: string): TrackerData {
+  const data = JSON.parse(text);
+  if (!data || typeof data !== 'object' || !Array.isArray(data.expenses)) throw new Error('Invalid saved data');
+  return { expenses: readExpenses(JSON.stringify(data.expenses)), budgets: readBudgets(data.budgets) };
+}
+
+export function budgetSummary(spent: number, budget: number) {
+  if (!Number.isSafeInteger(budget) || budget <= 0 || !Number.isSafeInteger(spent) || spent < 0) throw new Error('Invalid budget amounts');
+  return { remaining: budget - spent, percent: Math.round(spent / budget * 1000) / 10, progress: Math.min(spent / budget, 1) };
+}
 
 export function parseAmount(value: string): number | null {
   const match = /^(\d{1,8})(?:\.(\d{1,2}))?$/.exec(value.trim());
@@ -40,19 +60,20 @@ export function readExpenses(value: string | null): Expense[] {
 
 export const MAX_BACKUP_SIZE = 5 * 1024 * 1024;
 
-export function exportBackup(expenses: Expense[]): string {
-  const backup = JSON.stringify({ app: 'finance-tracker', version: 1, currency: 'INR', exportedAt: new Date().toISOString(), expenses }, null, 2);
+export function exportBackup(expenses: Expense[], budgets: Budgets = {}): string {
+  const backup = JSON.stringify({ app: 'finance-tracker', version: 2, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets }, null, 2);
   if (new TextEncoder().encode(backup).length > MAX_BACKUP_SIZE) throw new Error('Backups can be up to 5 MB.');
   return backup;
 }
 
-export function importBackup(text: string, existing: Expense[]): Expense[] {
+export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}): TrackerData {
   if (text.length > MAX_BACKUP_SIZE) throw new Error('Choose a backup smaller than 5 MB.');
   let backup;
   try { backup = JSON.parse(text); } catch { throw new Error('This file is not valid JSON.'); }
-  if (!backup || backup.app !== 'finance-tracker' || backup.version !== 1 || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
-    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1).');
+  if (!backup || backup.app !== 'finance-tracker' || ![1, 2].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
+    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1 or 2).');
   }
+  const incomingBudgets = backup.version === 2 ? readBudgets(backup.budgets) : {};
   let incoming: Expense[];
   try { incoming = readExpenses(JSON.stringify(backup.expenses)); }
   catch { throw new Error('The backup contains invalid expenses. Nothing was imported.'); }
@@ -66,7 +87,7 @@ export function importBackup(text: string, existing: Expense[]): Expense[] {
   }
   const result = [...merged.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   expenseTotal(result);
-  return result;
+  return { expenses: result, budgets: { ...incomingBudgets, ...budgets } };
 }
 
 export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Finance Tracker",
     "slug": "finance-tracker-app",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/finance-logo.png",
     "userInterfaceStyle": "light",
@@ -16,7 +16,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.zishanahmad.financetracker",
-      "versionCode": 6
+      "versionCode": 7
     },
     "web": {
       "favicon": "./assets/finance-logo.png"

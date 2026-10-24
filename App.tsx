@@ -4,14 +4,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Directory, File } from 'expo-file-system';
-import { localDate, parseExpenseDate, categories, expenseTotal, money, parseAmount, readExpenses, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
-import type { Expense, Category } from './expenses';
+import { budgetSummary, readTrackerData, localDate, parseExpenseDate, categories, expenseTotal, money, parseAmount, readExpenses, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
+import type { TrackerData, Budgets, Expense, Category } from './expenses';
 
-const STORAGE_KEY = 'finance-tracker.expenses.v1';
+const STORAGE_KEY = 'finance-tracker.data.v2';
+const LEGACY_STORAGE_KEY = 'finance-tracker.expenses.v1';
 const colors: Record<Category, string> = { Food: '#F5EADD', Transport: '#E3ECF5', Shopping: '#EEE5F3', Bills: '#F5E3DE', Other: '#E8ECE8' };
 
 function Tracker() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [budgets, setBudgets] = useState<Budgets>({});
+  const [budgetOpen, setBudgetOpen] = useState(false);
+  const [budgetAmount, setBudgetAmount] = useState('');
+  const [budgetError, setBudgetError] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -32,27 +37,43 @@ function Tracker() {
   const isCurrentMonth = month.getTime() === currentMonth.getTime();
   const monthLabel = month.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const visible = period === 'month' ? expensesForMonth(expenses, month) : expenses;
+  const spent = expenseTotal(visible);
+  const monthKey = localDate(month).slice(0, 7);
+  const budget = budgets[monthKey];
+  const usage = budget ? budgetSummary(spent, budget) : null;
 
   async function load() {
     setLoading(true);
     setLoadError(false);
-    try { setExpenses(readExpenses(await AsyncStorage.getItem(STORAGE_KEY))); }
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_KEY);
+      let data: TrackerData;
+      if (stored === null) {
+        const legacy = await AsyncStorage.getItem(LEGACY_STORAGE_KEY);
+        data = { expenses: readExpenses(legacy), budgets: {} };
+      } else {
+        data = readTrackerData(stored);
+      }
+      setExpenses(data.expenses);
+      setBudgets(data.budgets);
+    }
     catch { setLoadError(true); }
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
 
-  async function save(next: Expense[]) {
+  async function save(next: Expense[], nextBudgets: Budgets = budgets) {
     if (busy.current || loading || loadError) return false;
     busy.current = true;
     setSaving(true);
     try {
       expenseTotal(next);
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses: next, budgets: nextBudgets }));
       setExpenses(next);
+      setBudgets(nextBudgets);
       return true;
     } catch {
-      Alert.alert('Couldn’t save', 'Your expenses have not changed. Please try again.');
+      Alert.alert('Couldn’t save', 'Your data has not changed. Please try again.');
       return false;
     } finally { busy.current = false; setSaving(false); }
   }
@@ -78,6 +99,15 @@ function Tracker() {
     ]);
   }
 
+  async function saveBudget(remove = false) {
+    const amount = parseAmount(budgetAmount);
+    if (!remove && !amount) { setBudgetError('Enter a budget greater than zero, with up to 2 decimal places.'); return; }
+    const next = { ...budgets };
+    if (remove) delete next[monthKey];
+    else next[monthKey] = amount!;
+    if (await save(expenses, next)) setBudgetOpen(false);
+  }
+
   async function transfer(action: 'export' | 'import') {
     if (transferBusy.current || busy.current) return;
     transferBusy.current = true;
@@ -85,28 +115,29 @@ function Tracker() {
     let output: File | undefined;
     try {
       if (action === 'export') {
-        const data = exportBackup(expenses);
+        const data = exportBackup(expenses, budgets);
         const directory = await Directory.pickDirectoryAsync();
         output = directory.createFile(`finance-tracker-${Date.now()}.json`, 'application/json');
         await output.write(data);
         output = undefined;
-        Alert.alert('Backup saved', `All ${expenses.length} expenses were exported to the folder you selected.`);
+        Alert.alert('Backup saved', `All ${expenses.length} expenses and ${Object.keys(budgets).length} monthly budgets were exported to the folder you selected.`);
       } else {
         const picked = await File.pickFileAsync(undefined, 'application/json');
         const file = Array.isArray(picked) ? picked[0] : picked;
         if (!file || file.size === null || file.size > MAX_BACKUP_SIZE) throw new Error('Choose a JSON backup up to 5 MB.');
-        const next = importBackup(await file.text(), expenses);
-        const added = next.length - expenses.length;
-        if (added === 0) { Alert.alert('Already up to date', 'No new expenses were found in this backup.'); return; }
+        const next = importBackup(await file.text(), expenses, budgets);
+        const added = next.expenses.length - expenses.length;
+        const addedBudgets = Object.keys(next.budgets).length - Object.keys(budgets).length;
+        if (added === 0 && addedBudgets === 0) { Alert.alert('Already up to date', 'No new expenses or monthly budgets were found in this backup.'); return; }
         const confirmed = await new Promise<boolean>((resolve) => Alert.alert(
           'Import backup?',
-          `Add ${added} ${added === 1 ? 'expense' : 'expenses'}? Existing expenses will be kept, and exact duplicates will be skipped.`,
+          `Add ${added} expenses and ${addedBudgets} monthly budgets? Existing expenses and budget amounts will be kept, and duplicates will be skipped.`,
           [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Import', onPress: () => resolve(true) }],
           { cancelable: true, onDismiss: () => resolve(false) },
         ));
-        if (confirmed && await save(next)) {
+        if (confirmed && await save(next.expenses, next.budgets)) {
           setPeriod('all');
-          Alert.alert('Import complete', `${added} ${added === 1 ? 'expense was' : 'expenses were'} added.`);
+          Alert.alert('Import complete', `${added} expenses and ${addedBudgets} monthly budgets were added.`);
         }
       }
     } catch (failure) {
@@ -135,8 +166,13 @@ function Tracker() {
               <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={s.monthLabel}>{monthLabel}</Text>
               <Pressable accessibilityRole="button" accessibilityLabel="Next month" accessibilityState={{ disabled: month >= currentMonth }} disabled={month >= currentMonth} onPress={() => setMonth((value) => shiftMonth(value, 1))} style={[s.monthArrow, month >= currentMonth && s.disabled]}><Text style={s.monthArrowText}>›</Text></Pressable>
             </View> : <Text style={s.summaryLabel}>All time spending</Text>}
-            <Text adjustsFontSizeToFit numberOfLines={1} style={s.total}>{money(expenseTotal(visible))}</Text>
+            {period === 'month' && <Text style={s.spentLabel}>Spent this month</Text>}
+            <Text adjustsFontSizeToFit numberOfLines={1} style={s.total}>{money(spent)}</Text>
             <View style={s.summaryBottom}><View style={s.dot} /><Text style={s.summaryFoot}>{visible.length} {visible.length === 1 ? 'expense' : 'expenses'} recorded</Text></View>
+            {period === 'month' && <View style={s.budgetSection}>
+              <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>{budget ? `Budget ${money(budget)}` : 'Set monthly budget'}</Text><Text style={s.budgetEdit}>{budget ? 'Edit' : '+'}</Text></Pressable>
+              {usage && <><View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage.percent, 100), text: `${usage.percent}% used` }} style={s.progressTrack}><View style={[s.progressFill, { width: `${usage.progress * 100}%`, backgroundColor: usage.remaining < 0 ? '#A13D32' : '#476740' }]} /></View><View style={s.budgetStats}><Text style={s.budgetStat}>{usage.percent}% used</Text><Text style={[s.budgetRemaining, usage.remaining < 0 && s.overBudget]}>{usage.remaining < 0 ? `${money(-usage.remaining)} over budget` : `${money(usage.remaining)} left`}</Text></View></>}
+            </View>}
             {period === 'month' && !isCurrentMonth && <Pressable accessibilityRole="button" onPress={() => setMonth(currentMonth)} style={s.currentMonthButton}><Text style={s.currentMonthText}>Back to this month</Text></Pressable>}
           </View>
           <View style={s.sectionTop}>
@@ -155,14 +191,26 @@ function Tracker() {
           <View style={s.footer}><Pressable disabled={saving || transferring} accessibilityRole="button" onPress={() => { setTitle(''); setAmount(''); setCategory('Food'); setExpenseDate(localDate()); setError(''); setOpen(true); }} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.plus}>+</Text><Text style={s.primaryText}>Add expense</Text></Pressable><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => setBackupOpen(true)} style={s.backupLink}><Text style={s.link}>Data & backup</Text></Pressable></View>
         </>
       )}
+      <Modal visible={budgetOpen} animationType="slide" onRequestClose={() => { if (!saving) setBudgetOpen(false); }}>
+        <SafeAreaView style={s.screen}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={s.formHeader}><Text style={s.sectionTitle}>Monthly budget</Text><Pressable accessibilityRole="button" accessibilityLabel="Close budget form" disabled={saving} onPress={() => setBudgetOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
+            <Text style={s.emptyTitle}>{monthLabel}</Text><Text style={s.backupCopy}>Choose how much you plan to spend. This budget applies only to this month.</Text>
+            <Text style={s.label}>Budget in rupees</Text><TextInput accessibilityLabel="Monthly budget amount" value={budgetAmount} onChangeText={setBudgetAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor="#78836F" style={s.amountInput} maxLength={11} autoFocus />
+            <Text style={s.backupCopy}>Already spent: {money(spent)}</Text>
+            {!!budget && <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget(true)} style={s.backupLink}><Text style={s.overBudget}>Remove this month’s budget</Text></Pressable>}
+          </ScrollView>
+          <View style={s.formFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
+        </KeyboardAvoidingView></SafeAreaView>
+      </Modal>
       <Modal visible={backupOpen} animationType="slide" onRequestClose={() => { if (!transferring) setBackupOpen(false); }}>
         <SafeAreaView style={s.screen}>
           <View style={s.formHeader}><Text style={s.sectionTitle}>Data & backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup screen" disabled={transferring} onPress={() => setBackupOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView contentContainerStyle={s.form}>
             <Text style={s.emptyTitle}>Your data, to keep.</Text>
-            <Text style={s.backupCopy}>Back up all your expenses as a JSON file, or restore a backup from another device.</Text>
-            <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses, across every month. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
-            <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). New expenses are added; existing expenses and exact duplicates are kept once.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
+            <Text style={s.backupCopy}>Back up your expenses and monthly budgets as a JSON file, or restore a backup from another device.</Text>
+            <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses and {Object.keys(budgets).length} monthly budgets. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
+            <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). Old expense-only backups also work. New expenses and budgets for new months are added; existing budget amounts are kept.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
             {transferring && <ActivityIndicator color="#263F34" accessibilityLabel="Working with backup" />}
             <Text style={s.backupCopy}>Backup files contain your expense details in plain text. Keep them somewhere private. Your data stays on this device unless you export it.</Text>
           </ScrollView>
@@ -188,6 +236,7 @@ function Tracker() {
 export default function App() { return <SafeAreaProvider><Tracker /></SafeAreaProvider>; }
 
 const s = StyleSheet.create({
+  spentLabel: { color: '#4F624A', fontSize: 12, marginTop: 12 }, budgetSection: { borderTopWidth: 1, borderTopColor: '#CDD8C0', marginTop: 16, paddingTop: 4 }, budgetButton: { minHeight: 44, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, budgetLabel: { flex: 1, fontSize: 13, color: '#3A5433', fontWeight: '500' }, budgetEdit: { color: '#3A5433', fontWeight: '600', fontSize: 13 }, progressTrack: { height: 6, borderRadius: 3, backgroundColor: '#CDD8C0', overflow: 'hidden', marginTop: 3 }, progressFill: { height: 6, borderRadius: 3 }, budgetStats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 11 }, budgetStat: { fontSize: 12, color: '#52654A' }, budgetRemaining: { fontSize: 13, color: '#30492B', fontWeight: '600' }, overBudget: { color: '#A13D32', fontWeight: '600' },
   backupLink: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, backupCopy: { color: '#66765C', fontSize: 14, lineHeight: 22, marginVertical: 14 }, backupCard: { borderWidth: 1, borderColor: '#DDE3D6', borderRadius: 20, padding: 20, marginVertical: 10 },
   flex: { flex: 1 }, screen: { flex: 1, backgroundColor: '#FAFBF8' },
   header: { paddingHorizontal: 24, paddingTop: 24, paddingBottom: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },

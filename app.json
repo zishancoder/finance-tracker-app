@@ -2,26 +2,24 @@
   "expo": {
     "name": "Finance Tracker",
     "slug": "finance-tracker-app",
-    "version": "1.0.0",
+    "version": "1.0.4",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/finance-logo.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#263F34",
+        "foregroundImage": "./assets/finance-logo.png"
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.zishanahmad.financetracker",
-      "versionCode": 1
+      "versionCode": 5
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/finance-logo.png"
     }
   }
 }

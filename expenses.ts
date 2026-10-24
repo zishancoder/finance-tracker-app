@@ -19,19 +19,54 @@ export function readExpenses(value: string | null): Expense[] {
   if (value === null) return [];
   const data: unknown = JSON.parse(value);
   if (!Array.isArray(data) || !data.every((item) =>
-    item && typeof item.id === 'string' && typeof item.title === 'string' &&
-    item.title.trim().length > 0 && Number.isSafeInteger(item.cents) && item.cents > 0 &&
-    categories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date))
+    item && typeof item.id === 'string' && item.id.length > 0 && item.id.length <= 128 && typeof item.title === 'string' &&
+    item.title.trim().length > 0 && item.title.length <= 80 && Number.isSafeInteger(item.cents) && item.cents > 0 &&
+    categories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date)) && new Date(item.date).toISOString() === item.date
   ) || new Set(data.map((item) => item.id)).size !== data.length) throw new Error('Invalid saved expenses');
   expenseTotal(data);
-  return data;
+  return data.map(({ id, title, cents, category, date }) => ({ id, title, cents, category, date }));
 }
 
-export function thisMonth(expenses: Expense[], now = new Date()): Expense[] {
+export const MAX_BACKUP_SIZE = 5 * 1024 * 1024;
+
+export function exportBackup(expenses: Expense[]): string {
+  const backup = JSON.stringify({ app: 'finance-tracker', version: 1, currency: 'INR', exportedAt: new Date().toISOString(), expenses }, null, 2);
+  if (new TextEncoder().encode(backup).length > MAX_BACKUP_SIZE) throw new Error('Backups can be up to 5 MB.');
+  return backup;
+}
+
+export function importBackup(text: string, existing: Expense[]): Expense[] {
+  if (text.length > MAX_BACKUP_SIZE) throw new Error('Choose a backup smaller than 5 MB.');
+  let backup;
+  try { backup = JSON.parse(text); } catch { throw new Error('This file is not valid JSON.'); }
+  if (!backup || backup.app !== 'finance-tracker' || backup.version !== 1 || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
+    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1).');
+  }
+  let incoming: Expense[];
+  try { incoming = readExpenses(JSON.stringify(backup.expenses)); }
+  catch { throw new Error('The backup contains invalid expenses. Nothing was imported.'); }
+  const merged = new Map(existing.map((item) => [item.id, item]));
+  for (const item of incoming) {
+    const previous = merged.get(item.id);
+    if (previous && (['title', 'cents', 'category', 'date'] as const).some((key) => previous[key] !== item[key])) {
+      throw new Error('A backup expense conflicts with an existing expense. Nothing was imported.');
+    }
+    merged.set(item.id, item);
+  }
+  const result = [...merged.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  expenseTotal(result);
+  return result;
+}
+
+export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {
   return expenses.filter(({ date }) => {
     const day = new Date(date);
-    return day.getFullYear() === now.getFullYear() && day.getMonth() === now.getMonth();
+    return day.getFullYear() === month.getFullYear() && day.getMonth() === month.getMonth();
   });
+}
+
+export function shiftMonth(month: Date, offset: number): Date {
+  return new Date(month.getFullYear(), month.getMonth() + offset, 1);
 }
 
 export const money = (cents: number) => new Intl.NumberFormat('en-IN', {

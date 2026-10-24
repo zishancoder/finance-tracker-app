@@ -1,0 +1,4 @@
+Generated with the built-in Imagegen tool.
+
+Prompt:
+Use case: logo-brand. Create a polished minimal Android app icon for Finance Tracker, a calm personal expense tracker. Square 1024x1024 canvas, completely flat deep forest green #263F34 background that fills every edge, NOT rounded corners. In the exact center a single bold warm pale sage #E9EFDE geometric wallet mark, with a short simple ascending two-step line subtly integrated into its flap, conveying organized spending. The symbol must occupy only the central 45% of the canvas width and height, with very generous clear space on all four sides so Android adaptive-icon masks cannot clip it. Crisp vector-like edges, balanced silhouette, sophisticated and simple, recognizable at 32 pixels. No text, no letters, no currency signs, no gradients, no shadows, no texture, no border, no 3D, no mockup. Return the single finished icon.

@@ -46,3 +46,7 @@ Expense dates can be entered as YYYY-MM-DD, today or earlier.
 In the Monthly view, tap **Set monthly budget**, enter a positive rupee amount, and save. Each month has its own budget. The summary shows spending, percent used, and the amount left or over budget. Edit or remove a budget without changing expenses. New backups include budgets; old expense-only backups still import.
 
 Expenses from older installations are loaded automatically. New expense and budget changes are stored together so an import saves both in one write.
+
+## Expense details
+
+Tap **View expenses** on the overview to open the full-screen expense list. Browse months or switch to All time. The list and its filters scroll independently of the overview, with full descriptions, totals, and confirmed deletion. Add expense is available on both screens; Android Back or the back arrow returns to the overview. The overview summary scrolls on smaller displays.

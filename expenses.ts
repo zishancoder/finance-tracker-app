@@ -10,10 +10,37 @@ export function parseExpenseDate(value: string): Date | null {
 }
 
 export const categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Other'] as const;
-export type Category = (typeof categories)[number];
+export type Category = string;
 export type Expense = { id: string; title: string; cents: number; category: Category; date: string };
 export type Budgets = Record<string, number>;
-export type TrackerData = { expenses: Expense[]; budgets: Budgets };
+export type TrackerData = { expenses: Expense[]; budgets: Budgets; categories: string[] };
+
+export function categoryName(value: string, existing: readonly string[]): string {
+  const name = value.trim();
+  if (!name || name.length > 30 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error('Enter a category name of 1–30 characters.');
+  if (existing.some((item) => item.toLowerCase() === name.toLowerCase())) throw new Error('A category with this name already exists.');
+  return name;
+}
+
+export function readCategories(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error('Invalid saved categories');
+  const result: string[] = [];
+  for (const name of value) {
+    if (typeof name !== 'string' || categoryName(name, result) !== name) throw new Error('Invalid saved categories');
+    result.push(name);
+  }
+  if (!result.includes('Other')) throw new Error('Missing Other category');
+  return result;
+}
+
+export function deleteCategory(data: TrackerData, name: string): TrackerData {
+  if (name === 'Other' || !data.categories.includes(name)) throw new Error('Choose a category other than Other to delete.');
+  return {
+    ...data,
+    categories: data.categories.filter((category) => category !== name),
+    expenses: data.expenses.map((expense) => expense.category === name ? { ...expense, category: 'Other' } : expense),
+  };
+}
 
 export function readBudgets(value: unknown): Budgets {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid saved budgets');
@@ -25,7 +52,8 @@ export function readBudgets(value: unknown): Budgets {
 export function readTrackerData(text: string): TrackerData {
   const data = JSON.parse(text);
   if (!data || typeof data !== 'object' || !Array.isArray(data.expenses)) throw new Error('Invalid saved data');
-  return { expenses: readExpenses(JSON.stringify(data.expenses)), budgets: readBudgets(data.budgets) };
+  const savedCategories = data.categories === undefined ? [...categories] : readCategories(data.categories);
+  return { expenses: readExpenses(JSON.stringify(data.expenses), savedCategories), budgets: readBudgets(data.budgets), categories: savedCategories };
 }
 
 export function budgetSummary(spent: number, budget: number) {
@@ -46,13 +74,13 @@ export function expenseTotal(expenses: Expense[]): number {
   return total;
 }
 
-export function readExpenses(value: string | null): Expense[] {
+export function readExpenses(value: string | null, allowedCategories: readonly string[] = categories): Expense[] {
   if (value === null) return [];
   const data: unknown = JSON.parse(value);
   if (!Array.isArray(data) || !data.every((item) =>
     item && typeof item.id === 'string' && item.id.length > 0 && item.id.length <= 128 && typeof item.title === 'string' &&
     item.title.trim().length > 0 && item.title.length <= 80 && Number.isSafeInteger(item.cents) && item.cents > 0 &&
-    categories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date)) && new Date(item.date).toISOString() === item.date
+    allowedCategories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date)) && new Date(item.date).toISOString() === item.date
   ) || new Set(data.map((item) => item.id)).size !== data.length) throw new Error('Invalid saved expenses');
   expenseTotal(data);
   return data.map(({ id, title, cents, category, date }) => ({ id, title, cents, category, date }));
@@ -60,22 +88,27 @@ export function readExpenses(value: string | null): Expense[] {
 
 export const MAX_BACKUP_SIZE = 5 * 1024 * 1024;
 
-export function exportBackup(expenses: Expense[], budgets: Budgets = {}): string {
-  const backup = JSON.stringify({ app: 'finance-tracker', version: 2, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets }, null, 2);
+export function exportBackup(expenses: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories): string {
+  const backup = JSON.stringify({ app: 'finance-tracker', version: 3, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets, categories: savedCategories }, null, 2);
   if (new TextEncoder().encode(backup).length > MAX_BACKUP_SIZE) throw new Error('Backups can be up to 5 MB.');
   return backup;
 }
 
-export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}): TrackerData {
+export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories): TrackerData {
   if (text.length > MAX_BACKUP_SIZE) throw new Error('Choose a backup smaller than 5 MB.');
   let backup;
   try { backup = JSON.parse(text); } catch { throw new Error('This file is not valid JSON.'); }
-  if (!backup || backup.app !== 'finance-tracker' || ![1, 2].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
-    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1 or 2).');
+  if (!backup || backup.app !== 'finance-tracker' || ![1, 2, 3].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
+    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1, 2 or 3).');
   }
-  const incomingBudgets = backup.version === 2 ? readBudgets(backup.budgets) : {};
+  const incomingBudgets = backup.version >= 2 ? readBudgets(backup.budgets) : {};
+  const incomingCategories = backup.version === 3 ? readCategories(backup.categories) : [...categories];
+  const mergedCategories = [...savedCategories];
+  for (const name of incomingCategories) {
+    if (!mergedCategories.some((item) => item.toLowerCase() === name.toLowerCase())) mergedCategories.push(name);
+  }
   let incoming: Expense[];
-  try { incoming = readExpenses(JSON.stringify(backup.expenses)); }
+  try { incoming = readExpenses(JSON.stringify(backup.expenses), incomingCategories).map((item) => ({ ...item, category: mergedCategories.find((name) => name.toLowerCase() === item.category.toLowerCase())! })); }
   catch { throw new Error('The backup contains invalid expenses. Nothing was imported.'); }
   const merged = new Map(existing.map((item) => [item.id, item]));
   for (const item of incoming) {
@@ -87,7 +120,7 @@ export function importBackup(text: string, existing: Expense[], budgets: Budgets
   }
   const result = [...merged.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   expenseTotal(result);
-  return { expenses: result, budgets: { ...incomingBudgets, ...budgets } };
+  return { expenses: result, budgets: { ...incomingBudgets, ...budgets }, categories: mergedCategories };
 }
 
 export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {
@@ -95,6 +128,10 @@ export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {
     const day = new Date(date);
     return day.getFullYear() === month.getFullYear() && day.getMonth() === month.getMonth();
   });
+}
+
+export function expensesForCategory(expenses: Expense[], category: string | null): Expense[] {
+  return category === null ? expenses : expenses.filter((expense) => expense.category === category);
 }
 
 export function shiftMonth(month: Date, offset: number): Date {

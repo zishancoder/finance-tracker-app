@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { budgetSummary, readBudgets, readTrackerData, localDate, parseExpenseDate, parseAmount, readExpenses, expenseTotal, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
+import { categories, categoryName, deleteCategory, readCategories, budgetSummary, readBudgets, readTrackerData, localDate, parseExpenseDate, parseAmount, readExpenses, expenseTotal, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
 assert.equal(parseAmount('12.30'), 1230);
 assert.equal(parseAmount('0.01'), 1);
 for (const value of ['0', '-5', '1.001', '1e3', '', 'Infinity', '1,000', '100000000']) assert.equal(parseAmount(value), null, value);
@@ -28,7 +28,7 @@ assert.deepEqual(importBackup(exportBackup([]), expenses).expenses, expenses);
 assert.throws(() => importBackup('{', expenses));
 assert.throws(() => importBackup('null', expenses));
 assert.throws(() => importBackup(' '.repeat(MAX_BACKUP_SIZE + 1), expenses));
-for (const change of [{ version: 3 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
+for (const change of [{ version: 4 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
   assert.throws(() => importBackup(JSON.stringify({ ...JSON.parse(exportBackup(expenses)), ...change }), expenses));
 }
 assert.throws(() => importBackup(exportBackup([{ ...expenses[0], cents: 999 }]), expenses));
@@ -48,10 +48,10 @@ assert.throws(() => budgetSummary(100, 0));
 assert.deepEqual(readBudgets({ '2026-10': 10000 }), { '2026-10': 10000 });
 for (const value of [null, [], { '2026-13': 100 }, { '2026-10': -1 }, { '2026-10': '100' }, { '2026-10': 1.5 }]) assert.throws(() => readBudgets(value));
 const budgets = { '2026-10': 10000, '2026-09': 5000 };
-assert.deepEqual(importBackup(exportBackup(expenses, budgets), []), { expenses, budgets });
+assert.deepEqual(importBackup(exportBackup(expenses, budgets), []), { expenses, budgets, categories: [...categories] });
 assert.deepEqual(importBackup(exportBackup([], budgets), [], { '2026-10': 20000 }).budgets, { '2026-10': 20000, '2026-09': 5000 });
-assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 1, currency: 'INR', expenses }), [], budgets), { expenses, budgets });
-assert.deepEqual(readTrackerData(JSON.stringify({ expenses, budgets })), { expenses, budgets });
+assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 1, currency: 'INR', expenses }), [], budgets), { expenses, budgets, categories: [...categories] });
+assert.deepEqual(readTrackerData(JSON.stringify({ expenses, budgets })), { expenses, budgets, categories: [...categories] });
 assert.throws(() => readTrackerData(JSON.stringify({ expenses, budgets: { '2026-10': 0 } })));
 console.log('Budget calculations, overspending, validation, persistence format, and old/new backups passed.');
 
@@ -83,3 +83,50 @@ for (const theme of Object.values(themes)) {
 }
 assert.deepEqual(Object.keys(themes.light), Object.keys(themes.dark));
 console.log('Light and dark palettes meet text contrast checks across surfaces, buttons, budgets, errors, and categories.');
+
+assert.equal(categoryName('  Health  ', categories), 'Health');
+for (const name of ['', '   ', 'food', ' FOOD ', 'a'.repeat(31), 'Bad\nName']) assert.throws(() => categoryName(name, categories));
+const customCategories = [...categories, 'Health'];
+const customExpense = { ...expenses[0], id: 'health', category: 'Health' };
+assert.deepEqual(readTrackerData(JSON.stringify({ expenses: [customExpense], budgets, categories: customCategories })), { expenses: [customExpense], budgets, categories: customCategories });
+assert.deepEqual(importBackup(exportBackup([customExpense], budgets, customCategories), []), { expenses: [customExpense], budgets, categories: customCategories });
+assert.deepEqual(importBackup(exportBackup([], {}, customCategories), []).categories, customCategories);
+assert.deepEqual(importBackup(exportBackup([], {}, [...categories, 'health']), [], {}, customCategories).categories, customCategories);
+assert.equal(importBackup(exportBackup([{ ...customExpense, category: 'health' }], {}, [...categories, 'health']), [], {}, customCategories).expenses[0].category, 'Health');
+for (const value of [null, [], [...categories, 'food'], [...categories, ''], [...categories, 123], [...categories, ' Health ']]) assert.throws(() => readCategories(value));
+assert.throws(() => readTrackerData(JSON.stringify({ expenses: [customExpense], budgets })));
+assert.throws(() => importBackup(JSON.stringify({ ...JSON.parse(exportBackup([], {}, customCategories)), categories: [...categories, 'food'] }), []));
+assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 2, currency: 'INR', expenses, budgets }), []).categories, [...categories]);
+console.log('Custom categories validate names, persist, round-trip without expenses, merge case-insensitively, and keep older data compatible.');
+
+const beforeDelete = { expenses: [...expenses, customExpense], budgets, categories: customCategories };
+const afterDelete = deleteCategory(beforeDelete, 'Health');
+assert.deepEqual(afterDelete.categories, [...categories]);
+assert.deepEqual(afterDelete.expenses, [...expenses, { ...customExpense, category: 'Other' }]);
+assert.equal(expenseTotal(afterDelete.expenses), expenseTotal(beforeDelete.expenses));
+assert.deepEqual(afterDelete.budgets, budgets);
+assert.equal(beforeDelete.expenses[2].category, 'Health');
+assert.deepEqual(readTrackerData(JSON.stringify(afterDelete)), afterDelete);
+const withoutFood = deleteCategory(afterDelete, 'Food');
+assert.ok(!withoutFood.categories.includes('Food'));
+assert.equal(withoutFood.expenses[0].category, 'Other');
+assert.deepEqual(readTrackerData(JSON.stringify(withoutFood)), withoutFood);
+assert.deepEqual(importBackup(exportBackup(withoutFood.expenses, budgets, withoutFood.categories), [], {}, withoutFood.categories), { ...withoutFood, expenses: [...withoutFood.expenses].sort((a, b) => Date.parse(b.date) - Date.parse(a.date)) });
+assert.deepEqual(deleteCategory({ expenses: [], budgets, categories: customCategories }, 'Health').expenses, []);
+assert.throws(() => deleteCategory(beforeDelete, 'Other'));
+assert.throws(() => deleteCategory(beforeDelete, 'Missing'));
+assert.deepEqual(readCategories(['Other']), ['Other']);
+assert.throws(() => readCategories(['Food']));
+console.log('Category deletion preserves expenses and totals, protects Other, and survives persistence and backup round-trips.');
+
+const categoryInput = [...expenses, customExpense, { ...customExpense, id: 'health-old', cents: 500, date: expenses[1].date }];
+assert.equal(expenseTotal(expensesForCategory(categoryInput, 'Health')), 1730);
+assert.equal(expenseTotal(expensesForCategory(expensesForMonth(categoryInput, new Date(2026, 9, 1)), 'Health')), 1230);
+assert.equal(expenseTotal(expensesForCategory(expensesForMonth(categoryInput, new Date(2026, 8, 1)), 'Health')), 500);
+assert.deepEqual(expensesForCategory(categoryInput, null), categoryInput);
+assert.deepEqual(expensesForCategory(categoryInput, 'Bills'), []);
+assert.equal(expenseTotal(expensesForCategory(categoryInput, 'Bills')), 0);
+assert.deepEqual(expensesForCategory([], 'Health'), []);
+assert.deepEqual(expensesForCategory(categoryInput, 'Food'), [expenses[0]]);
+assert.equal(categoryInput.length, 4);
+console.log('Category filters handle custom categories, monthly/all-time totals, empty matches, clearing, and preserve input.');

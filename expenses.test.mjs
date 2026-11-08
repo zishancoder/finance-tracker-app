@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { categories, categoryName, deleteCategory, readCategories, budgetSummary, readBudgets, readTrackerData, localDate, parseExpenseDate, parseAmount, readExpenses, expenseTotal, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
+import { categories, categoryName, deleteCategory, readCategories, monthlyBudget, budgetSummary, readBudgets, readTrackerData, localDate, parseExpenseDate, parseAmount, readExpenses, expenseTotal, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses.ts';
 assert.equal(parseAmount('12.30'), 1230);
 assert.equal(parseAmount('0.01'), 1);
 for (const value of ['0', '-5', '1.001', '1e3', '', 'Infinity', '1,000', '100000000']) assert.equal(parseAmount(value), null, value);
@@ -28,7 +28,7 @@ assert.deepEqual(importBackup(exportBackup([]), expenses).expenses, expenses);
 assert.throws(() => importBackup('{', expenses));
 assert.throws(() => importBackup('null', expenses));
 assert.throws(() => importBackup(' '.repeat(MAX_BACKUP_SIZE + 1), expenses));
-for (const change of [{ version: 4 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
+for (const change of [{ version: 5 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
   assert.throws(() => importBackup(JSON.stringify({ ...JSON.parse(exportBackup(expenses)), ...change }), expenses));
 }
 assert.throws(() => importBackup(exportBackup([{ ...expenses[0], cents: 999 }]), expenses));
@@ -130,3 +130,40 @@ assert.deepEqual(expensesForCategory([], 'Health'), []);
 assert.deepEqual(expensesForCategory(categoryInput, 'Food'), [expenses[0]]);
 assert.equal(categoryInput.length, 4);
 console.log('Category filters handle custom categories, monthly/all-time totals, empty matches, clearing, and preserve input.');
+
+const rolloverBudgets = { '2026-12': 10000, '2027-01': 10000, '2027-02': 10000 };
+const rolloverExpenses = [
+  { ...expenses[0], id: 'dec', cents: 6000, date: new Date(2026, 11, 31, 23, 30).toISOString() },
+  { ...expenses[0], id: 'jan', cents: 11000, date: new Date(2027, 0, 1, 0, 30).toISOString() },
+];
+const carryMonths = ['2026-12', '2027-01'];
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, [], '2027-01'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, carryMonths, '2026-12'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, carryMonths, '2027-01'), { carried: 4000, total: 14000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, carryMonths, '2027-02'), { carried: 3000, total: 13000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, ['2026-12'], '2027-02'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, rolloverBudgets, ['2027-01'], '2027-02'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget([], {}, [], '2027-01'), { carried: 0, total: 0 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, { '2026-12': 10000 }, ['2026-12'], '2027-01'), { carried: 4000, total: 4000 });
+assert.deepEqual(monthlyBudget(rolloverExpenses, { '2026-12': 10000 }, ['2026-12'], '2027-02'), { carried: 0, total: 0 });
+assert.deepEqual(monthlyBudget([{ ...rolloverExpenses[0], cents: 10000 }], rolloverBudgets, carryMonths, '2027-01'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget([{ ...rolloverExpenses[0], cents: 15000 }], rolloverBudgets, carryMonths, '2027-01'), { carried: 0, total: 10000 });
+assert.deepEqual(monthlyBudget([], rolloverBudgets, carryMonths, '2027-02'), { carried: 20000, total: 30000 });
+assert.deepEqual(monthlyBudget([{ ...rolloverExpenses[0], cents: 8000 }, rolloverExpenses[1]], rolloverBudgets, carryMonths, '2027-02'), { carried: 1000, total: 11000 });
+const rolloverData = { expenses: rolloverExpenses, budgets: rolloverBudgets, categories: [...categories], carryForwardMonths: carryMonths };
+assert.deepEqual(readTrackerData(JSON.stringify(rolloverData)), rolloverData);
+assert.deepEqual(deleteCategory(rolloverData, 'Food').carryForwardMonths, carryMonths);
+const rolloverBackup = exportBackup(rolloverExpenses, rolloverBudgets, categories, carryMonths);
+assert.deepEqual(importBackup(rolloverBackup, []), { ...rolloverData, expenses: [...rolloverExpenses].reverse() });
+assert.deepEqual(importBackup(rolloverBackup, [], { '2026-12': 20000 }).carryForwardMonths, ['2027-01']);
+assert.deepEqual(importBackup(exportBackup([], { '2027-02': 5000 }), [], rolloverBudgets, categories, carryMonths).carryForwardMonths, carryMonths);
+assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 3, currency: 'INR', expenses: [], budgets: rolloverBudgets, categories }), []).carryForwardMonths, undefined);
+for (const value of [true, {}, ['2026-11'], ['2026-12', '2026-12'], [123]]) {
+  assert.throws(() => readTrackerData(JSON.stringify({ ...rolloverData, carryForwardMonths: value })));
+  assert.throws(() => importBackup(JSON.stringify({ ...JSON.parse(rolloverBackup), carryForwardMonths: value }), []));
+}
+const hugeBudgets = { '2026-12': Number.MAX_SAFE_INTEGER, '2027-01': 1 };
+assert.throws(() => monthlyBudget([], hugeBudgets, ['2026-12'], '2027-01'));
+assert.throws(() => readTrackerData(JSON.stringify({ ...rolloverData, expenses: [], budgets: hugeBudgets, carryForwardMonths: ['2026-12'] })));
+assert.throws(() => importBackup(exportBackup([], hugeBudgets, categories, ['2026-12']), []));
+console.log('Carry-forward handles opt-in/out, cumulative balances, local year boundaries, missing budgets, backdated changes, overspending, backups, and safe integer limits.');

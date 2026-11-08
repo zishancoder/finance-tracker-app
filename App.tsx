@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Appearance, ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Alert, Appearance, ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { recentExpensesForSpace } from './recentExpenses';
 import { themes } from './theme';
 import type { Theme } from './theme';
@@ -7,7 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Directory, File } from 'expo-file-system';
-import { budgetSummary, readTrackerData, localDate, parseExpenseDate, categoryName, deleteCategory, categories, expenseTotal, money, parseAmount, readExpenses, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
+import { monthlyBudget, budgetSummary, readTrackerData, localDate, parseExpenseDate, categoryName, deleteCategory, categories, expenseTotal, money, parseAmount, readExpenses, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
 import type { TrackerData, Budgets, Expense, Category } from './expenses';
 
 const STORAGE_KEY = 'finance-tracker.data.v2';
@@ -42,6 +42,8 @@ function Tracker() {
   const [recentHeight, setRecentHeight] = useState(0);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [budgets, setBudgets] = useState<Budgets>({});
+  const [carryForwardMonths, setCarryForwardMonths] = useState<string[]>([]);
+  const [budgetCarryForward, setBudgetCarryForward] = useState(false);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [budgetAmount, setBudgetAmount] = useState('');
   const [budgetError, setBudgetError] = useState('');
@@ -79,7 +81,8 @@ function Tracker() {
   const spent = expenseTotal(monthlyExpenses);
   const monthKey = localDate(month).slice(0, 7);
   const budget = budgets[monthKey];
-  const usage = budget ? budgetSummary(spent, budget) : null;
+  const availableBudget = monthlyBudget(expenses, budgets, carryForwardMonths, monthKey);
+  const usage = availableBudget.total ? budgetSummary(spent, availableBudget.total) : null;
 
   async function load() {
     setLoading(true);
@@ -95,6 +98,7 @@ function Tracker() {
       }
       setExpenses(data.expenses);
       setBudgets(data.budgets);
+      setCarryForwardMonths(data.carryForwardMonths ?? []);
       setSavedCategories(data.categories);
     }
     catch { setLoadError(true); }
@@ -102,15 +106,17 @@ function Tracker() {
   }
   useEffect(() => { void load(); }, []);
 
-  async function save(next: Expense[], nextBudgets: Budgets = budgets, nextCategories: string[] = savedCategories) {
+  async function save(next: Expense[], nextBudgets: Budgets = budgets, nextCategories: string[] = savedCategories, nextCarryForward: string[] = carryForwardMonths) {
     if (busy.current || loading || loadError) return false;
     busy.current = true;
     setSaving(true);
     try {
       expenseTotal(next);
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses: next, budgets: nextBudgets, categories: nextCategories }));
+      monthlyBudget(next, nextBudgets, nextCarryForward, '9999-12');
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses: next, budgets: nextBudgets, categories: nextCategories, carryForwardMonths: nextCarryForward }));
       setExpenses(next);
       setBudgets(nextBudgets);
+      setCarryForwardMonths(nextCarryForward);
       setSavedCategories(nextCategories);
       if (categoryFilter !== null && !nextCategories.includes(categoryFilter)) setCategoryFilter(null);
       return true;
@@ -171,7 +177,9 @@ function Tracker() {
     const next = { ...budgets };
     if (remove) delete next[monthKey];
     else next[monthKey] = amount!;
-    if (await save(expenses, next)) setBudgetOpen(false);
+    const nextCarry = carryForwardMonths.filter((key) => key !== monthKey);
+    if (!remove && budgetCarryForward) nextCarry.push(monthKey);
+    if (await save(expenses, next, savedCategories, nextCarry)) setBudgetOpen(false);
   }
 
   async function transfer(action: 'export' | 'import') {
@@ -181,28 +189,28 @@ function Tracker() {
     let output: File | undefined;
     try {
       if (action === 'export') {
-        const data = exportBackup(expenses, budgets, savedCategories);
+        const data = exportBackup(expenses, budgets, savedCategories, carryForwardMonths);
         const directory = await Directory.pickDirectoryAsync();
         output = directory.createFile(`finance-tracker-${Date.now()}.json`, 'application/json');
         await output.write(data);
         output = undefined;
-        Alert.alert('Backup saved', `All ${expenses.length} expenses and ${Object.keys(budgets).length} monthly budgets, plus all categories, were exported to the folder you selected.`);
+        Alert.alert('Backup saved', `All ${expenses.length} expenses and ${Object.keys(budgets).length} monthly budgets, plus all categories and carry-forward settings, were exported to the folder you selected.`);
       } else {
         const picked = await File.pickFileAsync(undefined, 'application/json');
         const file = Array.isArray(picked) ? picked[0] : picked;
         if (!file || file.size === null || file.size > MAX_BACKUP_SIZE) throw new Error('Choose a JSON backup up to 5 MB.');
-        const next = importBackup(await file.text(), expenses, budgets, savedCategories);
+        const next = importBackup(await file.text(), expenses, budgets, savedCategories, carryForwardMonths);
         const added = next.expenses.length - expenses.length;
         const addedBudgets = Object.keys(next.budgets).length - Object.keys(budgets).length;
         const addedCategories = next.categories.length - savedCategories.length;
         if (added === 0 && addedBudgets === 0 && addedCategories === 0) { Alert.alert('Already up to date', 'No new expenses, categories or monthly budgets were found in this backup.'); return; }
         const confirmed = await new Promise<boolean>((resolve) => Alert.alert(
           'Import backup?',
-          `Add ${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories? Existing expenses and budget amounts will be kept, and duplicates will be skipped.`,
+          `Add ${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories? Existing expenses, budget amounts and carry-forward settings will be kept, and duplicates will be skipped.`,
           [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Import', onPress: () => resolve(true) }],
           { cancelable: true, onDismiss: () => resolve(false) },
         ));
-        if (confirmed && await save(next.expenses, next.budgets, next.categories)) {
+        if (confirmed && await save(next.expenses, next.budgets, next.categories, next.carryForwardMonths ?? [])) {
           setPeriod('all');
           Alert.alert('Import complete', `${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories were added.`, [{ text: 'View expenses', onPress: () => { setBackupOpen(false); setDetailsOpen(true); } }]);
         }
@@ -250,7 +258,8 @@ function Tracker() {
             <Text adjustsFontSizeToFit numberOfLines={1} style={s.total}>{money(spent)}</Text>
             <View style={s.summaryBottom}><View style={s.dot} /><Text style={s.summaryFoot}>{monthlyExpenses.length} {monthlyExpenses.length === 1 ? 'expense' : 'expenses'} recorded</Text></View>
             <View style={s.budgetSection}>
-              <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>{budget ? `Budget ${money(budget)}` : 'Set monthly budget'}</Text><Text style={s.budgetEdit}>{budget ? 'Edit' : '+'}</Text></Pressable>
+              <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetCarryForward(carryForwardMonths.includes(monthKey)); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>{availableBudget.total ? `Budget ${money(availableBudget.total)}` : 'Set monthly budget'}</Text><Text style={s.budgetEdit}>{budget ? 'Edit' : '+'}</Text></Pressable>
+              {availableBudget.carried > 0 && <Text style={s.budgetStat}>{money(availableBudget.carried)} carried from last month</Text>}
               {usage && <><View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage.percent, 100), text: `${usage.percent}% used` }} style={s.progressTrack}><View style={[s.progressFill, { width: `${usage.progress * 100}%`, backgroundColor: usage.remaining < 0 ? theme.danger : theme.progress }]} /></View><View style={s.budgetStats}><Text style={s.budgetStat}>{usage.percent}% used</Text><Text style={[s.budgetRemaining, usage.remaining < 0 && s.overBudget]}>{usage.remaining < 0 ? `${money(-usage.remaining)} over budget` : `${money(usage.remaining)} left`}</Text></View></>}
             </View>
             {!isCurrentMonth && <Pressable accessibilityRole="button" onPress={() => setMonth(currentMonth)} style={s.currentMonthButton}><Text style={s.currentMonthText}>Back to this month</Text></Pressable>}
@@ -343,9 +352,11 @@ function Tracker() {
         <SafeAreaView style={s.screen}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={s.formHeader}><Text style={s.sectionTitle}>Monthly budget</Text><Pressable accessibilityRole="button" accessibilityLabel="Close budget form" disabled={saving} onPress={() => setBudgetOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
-            <Text style={s.emptyTitle}>{monthLabel}</Text><Text style={s.backupCopy}>Choose how much you plan to spend. This budget applies only to this month.</Text>
+            <Text style={s.emptyTitle}>{monthLabel}</Text><Text style={s.backupCopy}>Choose this month’s base budget. Any amount carried from last month is added separately.</Text>
             <Text style={s.label}>Budget in rupees</Text><TextInput accessibilityLabel="Monthly budget amount" value={budgetAmount} onChangeText={setBudgetAmount} editable={!saving} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={theme.placeholder} style={s.amountInput} maxLength={11} autoFocus />
-            <Text style={s.backupCopy}>Already spent: {money(spent)}</Text>
+            <Text style={s.backupCopy}>Already spent: {money(spent)}{availableBudget.carried > 0 ? ` · Carried from last month: ${money(availableBudget.carried)}` : ''}</Text>
+            <View style={s.carryForwardRow}><Text style={[s.sectionTitle, s.flex]}>Carry unused budget to next month</Text><Switch accessibilityLabel="Carry unused budget to next month" value={budgetCarryForward} onValueChange={setBudgetCarryForward} disabled={saving} trackColor={{ true: theme.accent }} /></View>
+            <Text style={s.backupCopy}>Only a positive amount left rolls into next month, including any carried funds. Turn this off to stop this month’s carry-forward and recalculate later months. Save budget to apply.</Text>
             {!!budget && <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget(true)} style={s.backupLink}><Text style={s.overBudget}>Remove this month’s budget</Text></Pressable>}
           <View style={s.inlineFormFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color={theme.onAccent} /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
           </ScrollView>
@@ -356,7 +367,7 @@ function Tracker() {
           <View style={s.formHeader}><Text style={s.sectionTitle}>Data & backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup screen" disabled={transferring} onPress={() => setBackupOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView contentContainerStyle={s.form}>
             <Text style={s.emptyTitle}>Your data, to keep.</Text>
-            <Text style={s.backupCopy}>Back up your expenses, categories and monthly budgets as a JSON file, or restore a backup from another device.</Text>
+            <Text style={s.backupCopy}>Back up your expenses, categories, monthly budgets and carry-forward settings as a JSON file, or restore a backup from another device.</Text>
             <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses and {Object.keys(budgets).length} monthly budgets. All categories are included. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
             <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). Old expense-only backups also work. New categories, expenses and budgets for new months are added; existing budget amounts are kept.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
             {transferring && <ActivityIndicator color={theme.accent} accessibilityLabel="Working with backup" />}
@@ -459,6 +470,7 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   inlineFormFooter: { paddingTop: 12, paddingBottom: 8 },
   expenseMeta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 6 },
   headerText: { flex: 1, minWidth: 0 }, footerAction: { flex: 1 }, footerLinkText: { color: theme.accent, fontWeight: '600', textAlign: 'center' },
+  carryForwardRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 16, minHeight: 48 },
   recentSpace: { flex: 1, minHeight: 0, marginHorizontal: 24, overflow: 'hidden' },
   recentHeader: { justifyContent: 'center', paddingTop: 12 },
   recentRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: 1, borderBottomColor: theme.divider },

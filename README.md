@@ -36,7 +36,7 @@ The output is `android/app/build/outputs/apk/release/app-release.apk`. Signing f
 Open **Data & backup** below the Add expense button.
 
 - **Export JSON** saves all expenses and monthly budgets, including previous months, into a folder you select.
-- **Import JSON** opens a Finance Tracker version 1, 2 or 3 JSON backup (INR, up to 5 MB), previews the number of new entries, and merges after confirmation. Exact duplicate IDs are skipped. Existing budget amounts are kept; budgets for new months are added. Conflicting IDs, unsupported formats, and invalid entries reject the entire import before saving.
+- **Import JSON** opens a Finance Tracker version 1, 2, 3 or 4 JSON backup (INR, up to 5 MB), previews the number of new entries, and merges after confirmation. Exact duplicate IDs are skipped. Existing budget amounts and carry-forward settings are kept; budgets for new months are added. Conflicting IDs, unsupported formats, and invalid entries reject the entire import before saving.
 - Backups are unencrypted plain text; keep them private. Canceling a picker or import confirmation leaves expenses unchanged.
 
 Expense dates can be entered as YYYY-MM-DD, today or earlier.
@@ -44,6 +44,10 @@ Expense dates can be entered as YYYY-MM-DD, today or earlier.
 ## Monthly budgets
 
 In the Monthly view, tap **Set monthly budget**, enter a positive rupee amount, and save. Each month has its own budget. The summary shows spending, percent used, and the amount left or over budget. Edit or remove a budget without changing expenses. New backups include budgets and categories; old expense-only backups still import.
+
+Enable **Carry unused budget to next month** in a month’s budget form and tap **Save budget** to roll its positive remaining allowance into the next month. This is off by default for each month. For example, a ₹10,000 budget with ₹6,000 spent carries ₹4,000 into the next month, in addition to that month’s own budget. The summary shows the carried amount separately. Carried funds can roll onward when the next month also has a budget with carry-forward enabled. No new base budget is created automatically, and overspending never carries forward.
+
+Turn the switch off and save to stop that month’s carry-forward; removing its budget also stops it. Changing an older budget, expense or switch recalculates later allowances. Version 4 backups include these settings and require this updated app to import; versions 1–3 remain supported.
 
 Expenses from older installations are loaded automatically. New expense and budget changes are stored together so an import saves both in one write.
 

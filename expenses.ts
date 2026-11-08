@@ -13,7 +13,7 @@ export const categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Other'] as
 export type Category = string;
 export type Expense = { id: string; title: string; cents: number; category: Category; date: string };
 export type Budgets = Record<string, number>;
-export type TrackerData = { expenses: Expense[]; budgets: Budgets; categories: string[] };
+export type TrackerData = { expenses: Expense[]; budgets: Budgets; categories: string[]; carryForwardMonths?: string[] };
 
 export function categoryName(value: string, existing: readonly string[]): string {
   const name = value.trim();
@@ -53,7 +53,40 @@ export function readTrackerData(text: string): TrackerData {
   const data = JSON.parse(text);
   if (!data || typeof data !== 'object' || !Array.isArray(data.expenses)) throw new Error('Invalid saved data');
   const savedCategories = data.categories === undefined ? [...categories] : readCategories(data.categories);
-  return { expenses: readExpenses(JSON.stringify(data.expenses), savedCategories), budgets: readBudgets(data.budgets), categories: savedCategories };
+  const result: TrackerData = { expenses: readExpenses(JSON.stringify(data.expenses), savedCategories), budgets: readBudgets(data.budgets), categories: savedCategories };
+  const carryForwardMonths = readCarryForwardMonths(data.carryForwardMonths, result.budgets);
+  if (carryForwardMonths.length) result.carryForwardMonths = carryForwardMonths;
+  monthlyBudget(result.expenses, result.budgets, carryForwardMonths, '9999-12');
+  return result;
+}
+
+function readCarryForwardMonths(value: unknown, budgets: Budgets): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((month) => typeof month === 'string' && Object.hasOwn(budgets, month)) || new Set(value).size !== value.length) throw new Error('Invalid budget carry-forward settings');
+  return value;
+}
+
+export function monthlyBudget(expenses: Expense[], budgets: Budgets, carryForwardMonths: readonly string[], month: string) {
+  const spending: Record<string, number> = {};
+  for (const expense of expenses) {
+    const key = localDate(new Date(expense.date)).slice(0, 7);
+    spending[key] = (spending[key] ?? 0) + expense.cents;
+  }
+  const enabled = new Set(carryForwardMonths);
+  let previous = '';
+  let remaining = 0;
+  let carried = 0;
+  let total = 0;
+  for (const key of [...new Set([...Object.keys(budgets), month])].filter((key) => key <= month).sort()) {
+    const [year, number] = key.split('-').map(Number);
+    const precedingMonth = number === 1 ? `${String(year - 1).padStart(4, '0')}-12` : `${key.slice(0, 4)}-${String(number - 1).padStart(2, '0')}`;
+    carried = previous === precedingMonth && enabled.has(previous) ? Math.max(remaining, 0) : 0;
+    total = (budgets[key] ?? 0) + carried;
+    if (!Number.isSafeInteger(total)) throw new Error('Budget total is too large');
+    remaining = total - (spending[key] ?? 0);
+    previous = key;
+  }
+  return { carried, total };
 }
 
 export function budgetSummary(spent: number, budget: number) {
@@ -88,21 +121,22 @@ export function readExpenses(value: string | null, allowedCategories: readonly s
 
 export const MAX_BACKUP_SIZE = 5 * 1024 * 1024;
 
-export function exportBackup(expenses: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories): string {
-  const backup = JSON.stringify({ app: 'finance-tracker', version: 3, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets, categories: savedCategories }, null, 2);
+export function exportBackup(expenses: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = []): string {
+  const backup = JSON.stringify({ app: 'finance-tracker', version: 4, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets, categories: savedCategories, carryForwardMonths }, null, 2);
   if (new TextEncoder().encode(backup).length > MAX_BACKUP_SIZE) throw new Error('Backups can be up to 5 MB.');
   return backup;
 }
 
-export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories): TrackerData {
+export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = []): TrackerData {
   if (text.length > MAX_BACKUP_SIZE) throw new Error('Choose a backup smaller than 5 MB.');
   let backup;
   try { backup = JSON.parse(text); } catch { throw new Error('This file is not valid JSON.'); }
-  if (!backup || backup.app !== 'finance-tracker' || ![1, 2, 3].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
-    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1, 2 or 3).');
+  if (!backup || backup.app !== 'finance-tracker' || ![1, 2, 3, 4].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
+    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1, 2, 3 or 4).');
   }
   const incomingBudgets = backup.version >= 2 ? readBudgets(backup.budgets) : {};
-  const incomingCategories = backup.version === 3 ? readCategories(backup.categories) : [...categories];
+  const incomingCategories = backup.version >= 3 ? readCategories(backup.categories) : [...categories];
+  const incomingCarry = backup.version >= 4 ? readCarryForwardMonths(backup.carryForwardMonths, incomingBudgets) : [];
   const mergedCategories = [...savedCategories];
   for (const name of incomingCategories) {
     if (!mergedCategories.some((item) => item.toLowerCase() === name.toLowerCase())) mergedCategories.push(name);
@@ -120,7 +154,10 @@ export function importBackup(text: string, existing: Expense[], budgets: Budgets
   }
   const result = [...merged.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   expenseTotal(result);
-  return { expenses: result, budgets: { ...incomingBudgets, ...budgets }, categories: mergedCategories };
+  const mergedBudgets = { ...incomingBudgets, ...budgets };
+  const mergedCarry = [...carryForwardMonths, ...incomingCarry.filter((month) => !Object.hasOwn(budgets, month))];
+  monthlyBudget(result, mergedBudgets, mergedCarry, '9999-12');
+  return { expenses: result, budgets: mergedBudgets, categories: mergedCategories, ...(mergedCarry.length ? { carryForwardMonths: mergedCarry } : {}) };
 }
 
 export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {

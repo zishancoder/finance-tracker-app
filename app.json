@@ -20,6 +20,9 @@
     },
     "web": {
       "favicon": "./assets/finance-logo.png"
-    }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

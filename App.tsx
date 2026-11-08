@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Appearance, ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Alert, Appearance, ActivityIndicator, BackHandler, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { PageModal } from './PageModal';
 import { recentExpensesForSpace } from './recentExpenses';
 import { themes } from './theme';
 import type { Theme } from './theme';
@@ -7,16 +9,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Directory, File } from 'expo-file-system';
-import { monthlyBudget, budgetSummary, readTrackerData, localDate, parseExpenseDate, categoryName, deleteCategory, categories, expenseTotal, money, parseAmount, readExpenses, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
-import type { TrackerData, Budgets, Expense, Category } from './expenses';
+import { walletSummary, readWalletDeposits, monthlyBudget, budgetSummary, readTrackerData, localDate, parseExpenseDate, categoryName, deleteCategory, categories, expenseTotal, money, parseAmount, readExpenses, expensesForCategory, expensesForMonth, shiftMonth, exportBackup, importBackup, MAX_BACKUP_SIZE } from './expenses';
+import type { WalletDeposit, TrackerData, Budgets, Expense, Category } from './expenses';
 
 const STORAGE_KEY = 'finance-tracker.data.v2';
 const LEGACY_STORAGE_KEY = 'finance-tracker.expenses.v1';
 const THEME_KEY = 'finance-tracker.theme';
 
 function Tracker() {
-  const [mode, setMode] = useState<'light' | 'dark'>('light');
+  const [mode, setMode] = useState<'light' | 'dark'>('dark');
   const [themeBusy, setThemeBusy] = useState(true);
+  const [page, setPage] = useState<'Home' | 'Expenses' | 'Wallet' | 'Settings'>('Home');
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const theme = themes[mode];
   const s = styles[mode];
@@ -41,9 +44,16 @@ function Tracker() {
   const { fontScale } = useWindowDimensions();
   const [recentHeight, setRecentHeight] = useState(0);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [walletDeposits, setWalletDeposits] = useState<WalletDeposit[]>([]);
+  const [walletAmount, setWalletAmount] = useState('');
+  const [walletTitle, setWalletTitle] = useState('');
+  const [walletError, setWalletError] = useState('');
+  const [payFromWallet, setPayFromWallet] = useState(false);
+  const wallet = walletSummary(expenses, walletDeposits);
   const [budgets, setBudgets] = useState<Budgets>({});
   const [carryForwardMonths, setCarryForwardMonths] = useState<string[]>([]);
   const [budgetCarryForward, setBudgetCarryForward] = useState(false);
+  const [walletCardOpen, setWalletCardOpen] = useState(false);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [budgetAmount, setBudgetAmount] = useState('');
   const [budgetError, setBudgetError] = useState('');
@@ -58,7 +68,6 @@ function Tracker() {
   const [month, setMonth] = useState(() => shiftMonth(new Date(), 0));
   const [open, setOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const transferBusy = useRef(false);
   const [expenseDate, setExpenseDate] = useState(() => localDate());
@@ -84,6 +93,17 @@ function Tracker() {
   const availableBudget = monthlyBudget(expenses, budgets, carryForwardMonths, monthKey);
   const usage = availableBudget.total ? budgetSummary(spent, availableBudget.total) : null;
 
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (page === 'Home') return false;
+      if (saving || transferring) return true;
+      if (filterOpen) setFilterOpen(false);
+      else setPage('Home');
+      return true;
+    });
+    return () => subscription.remove();
+  }, [page, filterOpen, saving, transferring]);
+
   async function load() {
     setLoading(true);
     setLoadError(false);
@@ -97,6 +117,7 @@ function Tracker() {
         data = readTrackerData(stored);
       }
       setExpenses(data.expenses);
+      setWalletDeposits(data.walletDeposits ?? []);
       setBudgets(data.budgets);
       setCarryForwardMonths(data.carryForwardMonths ?? []);
       setSavedCategories(data.categories);
@@ -106,15 +127,17 @@ function Tracker() {
   }
   useEffect(() => { void load(); }, []);
 
-  async function save(next: Expense[], nextBudgets: Budgets = budgets, nextCategories: string[] = savedCategories, nextCarryForward: string[] = carryForwardMonths) {
+  async function save(next: Expense[], nextBudgets: Budgets = budgets, nextCategories: string[] = savedCategories, nextCarryForward: string[] = carryForwardMonths, nextDeposits: WalletDeposit[] = walletDeposits) {
     if (busy.current || loading || loadError) return false;
     busy.current = true;
     setSaving(true);
     try {
+      walletSummary(next, readWalletDeposits(nextDeposits));
       expenseTotal(next);
       monthlyBudget(next, nextBudgets, nextCarryForward, '9999-12');
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses: next, budgets: nextBudgets, categories: nextCategories, carryForwardMonths: nextCarryForward }));
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses: next, budgets: nextBudgets, categories: nextCategories, carryForwardMonths: nextCarryForward, walletDeposits: nextDeposits }));
       setExpenses(next);
+      setWalletDeposits(nextDeposits);
       setBudgets(nextBudgets);
       setCarryForwardMonths(nextCarryForward);
       setSavedCategories(nextCategories);
@@ -132,12 +155,29 @@ function Tracker() {
     if (!title.trim()) { setError('Add a short description for this expense.'); return; }
     const date = parseExpenseDate(expenseDate);
     if (!date || expenseDate > localDate()) { setError('Enter a valid date as YYYY-MM-DD, today or earlier.'); return; }
-    const item: Expense = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, title: title.trim(), cents, category, date: date.toISOString() };
+    const item: Expense = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, title: title.trim(), cents, category, date: date.toISOString(), ...(payFromWallet ? { wallet: true } : {}) };
     if (await save([item, ...expenses])) {
       setMonth(shiftMonth(date, 0));
       setPeriod('month');
       setOpen(false);
     }
+  }
+
+  async function addWalletMoney() {
+    const cents = parseAmount(walletAmount);
+    if (!cents) { setWalletError('Enter an amount greater than zero, with up to 2 decimal places.'); return; }
+    if (!walletTitle.trim()) { setWalletError('Add a short description for this money.'); return; }
+    const deposit: WalletDeposit = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, title: walletTitle.trim(), cents, date: new Date().toISOString() };
+    if (await save(expenses, budgets, savedCategories, carryForwardMonths, [deposit, ...walletDeposits])) {
+      setWalletAmount(''); setWalletTitle(''); setWalletError('');
+    }
+  }
+
+  function removeDeposit(item: WalletDeposit) {
+    Alert.alert('Delete money added?', `${item.title} · ${money(item.cents)}. Your wallet balance will be recalculated.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => { void save(expenses, budgets, savedCategories, carryForwardMonths, walletDeposits.filter((deposit) => deposit.id !== item.id)); } },
+    ]);
   }
 
   async function createCategory() {
@@ -164,7 +204,7 @@ function Tracker() {
     ]);
   }
 
-  function remove(item: Expense) {
+  function remove(item: Pick<Expense, 'id' | 'title' | 'cents'>) {
     Alert.alert('Delete expense?', `${item.title} · ${money(item.cents)}`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: () => { void save(expenses.filter((expense) => expense.id !== item.id)); } },
@@ -189,30 +229,31 @@ function Tracker() {
     let output: File | undefined;
     try {
       if (action === 'export') {
-        const data = exportBackup(expenses, budgets, savedCategories, carryForwardMonths);
+        const data = exportBackup(expenses, budgets, savedCategories, carryForwardMonths, walletDeposits);
         const directory = await Directory.pickDirectoryAsync();
         output = directory.createFile(`finance-tracker-${Date.now()}.json`, 'application/json');
         await output.write(data);
         output = undefined;
-        Alert.alert('Backup saved', `All ${expenses.length} expenses and ${Object.keys(budgets).length} monthly budgets, plus all categories and carry-forward settings, were exported to the folder you selected.`);
+        Alert.alert('Backup saved', `All ${expenses.length} expenses and ${Object.keys(budgets).length} monthly budgets, plus all categories, wallet activity and carry-forward settings, were exported to the folder you selected.`);
       } else {
         const picked = await File.pickFileAsync(undefined, 'application/json');
         const file = Array.isArray(picked) ? picked[0] : picked;
         if (!file || file.size === null || file.size > MAX_BACKUP_SIZE) throw new Error('Choose a JSON backup up to 5 MB.');
-        const next = importBackup(await file.text(), expenses, budgets, savedCategories, carryForwardMonths);
+        const next = importBackup(await file.text(), expenses, budgets, savedCategories, carryForwardMonths, walletDeposits);
+        const addedDeposits = (next.walletDeposits ?? []).length - walletDeposits.length;
         const added = next.expenses.length - expenses.length;
         const addedBudgets = Object.keys(next.budgets).length - Object.keys(budgets).length;
         const addedCategories = next.categories.length - savedCategories.length;
-        if (added === 0 && addedBudgets === 0 && addedCategories === 0) { Alert.alert('Already up to date', 'No new expenses, categories or monthly budgets were found in this backup.'); return; }
+        if (added === 0 && addedBudgets === 0 && addedCategories === 0 && addedDeposits === 0) { Alert.alert('Already up to date', 'No new wallet deposits, expenses, categories or monthly budgets were found in this backup.'); return; }
         const confirmed = await new Promise<boolean>((resolve) => Alert.alert(
           'Import backup?',
-          `Add ${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories? Existing expenses, budget amounts and carry-forward settings will be kept, and duplicates will be skipped.`,
+          `Add ${addedDeposits} wallet deposits, ${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories? Existing expenses, budget amounts and carry-forward settings will be kept, and duplicates will be skipped.`,
           [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Import', onPress: () => resolve(true) }],
           { cancelable: true, onDismiss: () => resolve(false) },
         ));
-        if (confirmed && await save(next.expenses, next.budgets, next.categories, next.carryForwardMonths ?? [])) {
+        if (confirmed && await save(next.expenses, next.budgets, next.categories, next.carryForwardMonths ?? [], next.walletDeposits ?? [])) {
           setPeriod('all');
-          Alert.alert('Import complete', `${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories were added.`, [{ text: 'View expenses', onPress: () => { setBackupOpen(false); setDetailsOpen(true); } }]);
+          Alert.alert('Import complete', `${addedDeposits} wallet deposits, ${added} expenses, ${addedBudgets} monthly budgets and ${addedCategories} categories were added.`, [{ text: 'View expenses', onPress: () => { setBackupOpen(false); setPage('Expenses'); } }]);
         }
       }
     } catch (failure) {
@@ -226,7 +267,7 @@ function Tracker() {
 
   function startExpense() {
     setManagingCategories(false); setCreatingCategory(false); setNewCategory(''); setCategoryError('');
-    setTitle(''); setAmount(''); setCategory(savedCategories.includes('Food') ? 'Food' : 'Other'); setExpenseDate(localDate()); setError(''); setOpen(true);
+    setPayFromWallet(false); setTitle(''); setAmount(''); setCategory(savedCategories.includes('Food') ? 'Food' : 'Other'); setExpenseDate(localDate()); setError(''); setOpen(true);
   }
 
   const monthNavigation = (
@@ -237,55 +278,96 @@ function Tracker() {
             </View>
   );
 
+  const walletContent = (
+    <KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={s.formHeader}><Text accessibilityRole="header" style={s.sectionTitle}>Cash wallet</Text><Pressable accessibilityRole="button" accessibilityLabel="Close wallet" disabled={saving} onPress={() => { if (walletCardOpen) setWalletCardOpen(false); else setPage('Home'); }} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+          <FlatList style={s.flex} keyboardShouldPersistTaps="handled" contentContainerStyle={s.list}
+            data={[...walletDeposits.map((item) => ({ ...item, deposit: true })), ...expenses.filter((item) => item.wallet).map((item) => ({ ...item, deposit: false }))].sort((a, b) => Date.parse(b.date) - Date.parse(a.date))}
+            keyExtractor={(item) => `${item.deposit ? 'deposit' : 'expense'}-${item.id}`}
+            ListHeaderComponent={<>
+              <View style={s.filteredSummary}><Text style={s.filteredCategory}>Available balance · all time</Text><Text accessibilityLiveRegion="polite" adjustsFontSizeToFit numberOfLines={1} style={s.filteredTotal}>{money(wallet.balance)}</Text><Text style={s.filteredScope}>Added {money(wallet.added)} · Spent {money(wallet.spent)}</Text></View>
+              <Text style={s.backupCopy}>Record cash you have or money you receive. Choose Cash wallet when adding an expense to deduct it here. Existing expenses stay unassigned.</Text>
+              {wallet.balance < 0 && <Text style={s.overBudget}>Recorded spending exceeds money added by {money(-wallet.balance)}.</Text>}
+              <Text style={s.label}>Add money · rupees</Text><TextInput accessibilityLabel="Money to add in rupees" keyboardType="decimal-pad" value={walletAmount} onChangeText={setWalletAmount} editable={!saving} placeholder="0.00" placeholderTextColor={theme.placeholder} maxLength={11} style={s.input} />
+              <Text style={s.label}>Description</Text><TextInput accessibilityLabel="Money added description" value={walletTitle} onChangeText={setWalletTitle} editable={!saving} placeholder="e.g. Opening cash or salary" placeholderTextColor={theme.placeholder} maxLength={80} style={s.input} />
+              {!!walletError && <Text accessibilityRole="alert" style={s.error}>{walletError}</Text>}
+              <Pressable accessibilityRole="button" disabled={saving} onPress={addWalletMoney} style={[s.primary, saving && s.disabled]}><Text style={s.primaryText}>{saving ? 'Saving…' : 'Add money'}</Text></Pressable>
+              <Text accessibilityRole="header" style={[s.sectionTitle, { marginTop: 28, marginBottom: 12 }]}>Wallet activity</Text>
+            </>}
+            ListEmptyComponent={<Text style={s.backupCopy}>No wallet activity yet.</Text>}
+            renderItem={({ item }) => <View style={s.row}><View style={s.rowBody}><Text style={s.rowTitle}>{item.title}</Text><Text style={s.rowSubtitle}>{item.deposit ? 'Money added' : 'Expense'} · {new Date(item.date).toLocaleDateString('en-IN')}</Text><Text style={s.rowAmount}>{item.deposit ? '+' : '−'}{money(item.cents)}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Delete ${item.title}`} disabled={saving} style={s.delete} onPress={() => item.deposit ? removeDeposit(item) : remove(item)}><Text style={s.deleteText}>×</Text></Pressable></View>}
+          />
+        </KeyboardAvoidingView>
+  );
+
   return (
     <SafeAreaView style={s.screen}>
       <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
+      {page === 'Home' && <>
       <View style={s.header}>
-        <View style={s.headerText}><Text style={s.eyebrow}>A LITTLE CLARITY, EVERY DAY</Text><Text accessibilityRole="header" style={s.heading}>Your expenses.</Text></View>
-        <Image source={require('./assets/finance-logo.png')} accessibilityLabel="Finance Tracker" accessibilityIgnoresInvertColors style={s.logo} />
+        <View style={s.headerText}><Text accessibilityRole="header" style={s.heading}>Overview</Text><Text style={s.eyebrow}>{now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase()}</Text></View>
       </View>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Appearance, ${mode} mode`} accessibilityHint="Opens theme previews" onPress={() => setAppearanceOpen(true)} style={({ pressed }) => [s.appearanceTrigger, pressed && s.pressed]}>
-        <Text style={s.appearanceLabel}>Appearance</Text><View style={s.appearanceValue}><View style={[s.appearanceSwatch, { backgroundColor: theme.accent }]} /><Text style={s.appearanceText}>{mode === 'light' ? 'Light' : 'Dark'}</Text><Text style={s.muted}>›</Text></View>
-      </Pressable>
       {loading ? <View style={s.center}><ActivityIndicator color={theme.accent} accessibilityLabel="Loading expenses" /></View> : loadError ? (
         <View style={s.center}><Text style={s.emptyTitle}>Couldn’t load your expenses</Text><Text style={s.muted}>Your saved data hasn’t been changed.</Text><Pressable style={s.retry} onPress={load}><Text style={s.link}>Try again</Text></Pressable></View>
       ) : (
         <>
           <ScrollView style={s.flex} contentContainerStyle={s.overviewContent}>
           <View style={s.summary}>
-            {monthNavigation}
-            <Text style={s.spentLabel}>Spent this month</Text>
-            <Text adjustsFontSizeToFit numberOfLines={1} style={s.total}>{money(spent)}</Text>
-            <View style={s.summaryBottom}><View style={s.dot} /><Text style={s.summaryFoot}>{monthlyExpenses.length} {monthlyExpenses.length === 1 ? 'expense' : 'expenses'} recorded</Text></View>
+            <View style={s.overviewMonth}><View style={s.calendarBadge}><Ionicons accessible={false} importantForAccessibility="no" name="calendar-outline" size={17} color={theme.summaryText} /></View><Text style={[s.budgetLabel, { fontSize: 14, fontWeight: '600' }]}>{monthLabel}</Text><Pressable accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth((value) => shiftMonth(value, -1))} style={s.overviewArrow}><Ionicons accessible={false} importantForAccessibility="no" name="chevron-back" size={18} color={theme.summaryText} /></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Next month" disabled={month >= currentMonth} onPress={() => setMonth((value) => shiftMonth(value, 1))} style={[s.overviewArrow, month >= currentMonth && s.disabled]}><Ionicons accessible={false} importantForAccessibility="no" name="chevron-forward" size={18} color={theme.summaryText} /></Pressable></View>
+            <View style={s.spendingRow}>
+              <View style={s.rowBody}>
+                <Text style={s.spentLabel}>Total spent</Text>
+                <Text adjustsFontSizeToFit numberOfLines={1} style={s.total}>{money(spent)}</Text>
+                <View style={s.summaryBottom}><Text style={s.summaryFoot}>{monthlyExpenses.length ? `${monthlyExpenses.length} ${monthlyExpenses.length === 1 ? 'expense' : 'expenses'} recorded` : 'No expenses yet this month'}</Text></View>
+              </View>
+              <Image source={require('./assets/spending-wallet.png')} accessible={false} importantForAccessibility="no" style={s.spendingIllustration} resizeMode="contain" />
+            </View>
             <View style={s.budgetSection}>
-              <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetCarryForward(carryForwardMonths.includes(monthKey)); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>{availableBudget.total ? `Budget ${money(availableBudget.total)}` : 'Set monthly budget'}</Text><Text style={s.budgetEdit}>{budget ? 'Edit' : '+'}</Text></Pressable>
+              <Pressable disabled={saving || transferring} accessibilityRole="button" accessibilityLabel={budget ? 'Edit monthly budget' : 'Set monthly budget'} onPress={() => { setBudgetAmount(budget ? (budget / 100).toFixed(2) : ''); setBudgetCarryForward(carryForwardMonths.includes(monthKey)); setBudgetError(''); setBudgetOpen(true); }} style={s.budgetButton}><Text style={s.budgetLabel}>Monthly budget</Text><View style={s.budgetAction}><Text style={s.budgetEdit}>{budget ? 'Edit' : 'Set up'}</Text><Ionicons accessible={false} importantForAccessibility="no" name="chevron-forward" size={14} color={theme.link} /></View></Pressable>
               {availableBudget.carried > 0 && <Text style={s.budgetStat}>{money(availableBudget.carried)} carried from last month</Text>}
-              {usage && <><View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage.percent, 100), text: `${usage.percent}% used` }} style={s.progressTrack}><View style={[s.progressFill, { width: `${usage.progress * 100}%`, backgroundColor: usage.remaining < 0 ? theme.danger : theme.progress }]} /></View><View style={s.budgetStats}><Text style={s.budgetStat}>{usage.percent}% used</Text><Text style={[s.budgetRemaining, usage.remaining < 0 && s.overBudget]}>{usage.remaining < 0 ? `${money(-usage.remaining)} over budget` : `${money(usage.remaining)} left`}</Text></View></>}
+              <View accessibilityRole="progressbar" accessibilityLabel="Monthly budget usage" accessibilityValue={{ min: 0, max: 100, now: Math.min(usage?.percent ?? 0, 100), text: usage ? `${usage.percent}% used` : 'No monthly budget set' }} style={s.progressTrack}><View style={[s.progressFill, { width: `${(usage?.progress ?? 0) * 100}%`, backgroundColor: usage && usage.remaining < 0 ? theme.danger : theme.progress }]} /></View>
+              <View style={s.budgetStats}><Text style={s.budgetStat}>{usage?.percent ?? 0}% used</Text><Text style={[s.budgetRemaining, usage && usage.remaining < 0 && s.overBudget]}>{money(spent)} of {usage ? money(availableBudget.total) : '—'}</Text></View>
+              {usage && usage.remaining < 0 && <Text style={[s.budgetStat, s.overBudget]}>{money(-usage.remaining)} over budget</Text>}
             </View>
             {!isCurrentMonth && <Pressable accessibilityRole="button" onPress={() => setMonth(currentMonth)} style={s.currentMonthButton}><Text style={s.currentMonthText}>Back to this month</Text></Pressable>}
           </View>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Cash wallet, balance ${money(wallet.balance)}`} disabled={saving || transferring} onPress={() => { setWalletError(''); setWalletCardOpen(true); }} style={s.walletCard}>
+            <View style={s.walletIcon}><Ionicons accessible={false} importantForAccessibility="no" name="wallet-outline" size={22} color={theme.link} /></View>
+            <View style={s.rowBody}><Text style={s.walletTitle}>Cash wallet</Text><Text style={s.walletCaption}>Available balance</Text></View>
+            <Text adjustsFontSizeToFit numberOfLines={1} style={s.walletBalance}>{money(wallet.balance)}</Text>
+            <Ionicons accessible={false} importantForAccessibility="no" name="chevron-forward" size={18} color={theme.muted} />
+          </Pressable>
           <View style={s.recentSpace} onLayout={({ nativeEvent }) => setRecentHeight(nativeEvent.layout.height)}>
+            <View style={[s.recentHeader, { height: recent.headerHeight }]}><Text accessibilityRole="header" style={s.walletTitle}>Recent expenses</Text></View>
+            {!monthlyExpenses.length && <View style={s.overviewEmpty}><Ionicons accessible={false} importantForAccessibility="no" name="receipt-outline" size={26} color={theme.muted} /><Text style={s.overviewEmptyTitle}>No expenses yet</Text><Text style={s.emptyCopy}>Add your first expense to start tracking.</Text></View>}
             {!!recent.items.length && <>
-              <View style={[s.recentHeader, { height: recent.headerHeight }]}><Text accessibilityRole="header" style={s.sectionTitle}>Recent expenses</Text></View>
               {recent.items.map((item) => <View key={item.id} style={[s.recentRow, { height: recent.rowHeight }]}>
                 <View style={[s.recentIcon, { backgroundColor: theme.categories[categories.find((name) => name === item.category) ?? 'Other'] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
-                <View style={s.rowBody}><Text numberOfLines={1} style={s.recentTitle}>{item.title}</Text><Text numberOfLines={1} style={s.recentMeta}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text></View>
+                <View style={s.rowBody}><Text numberOfLines={1} style={s.recentTitle}>{item.title}</Text><Text numberOfLines={1} style={s.recentMeta}>{item.category}{item.wallet ? ' · Cash wallet' : ''} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text></View>
                 <Text numberOfLines={1} adjustsFontSizeToFit style={s.recentAmount}>{money(item.cents)}</Text>
               </View>)}
             </>}
           </View>
           </ScrollView>
-          <View style={s.footer}><Pressable disabled={saving || transferring} accessibilityRole="button" onPress={startExpense} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.plus}>+</Text><Text style={s.primaryText}>Add expense</Text></Pressable><View style={s.footerLinks}><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => { setPeriod('month'); setDetailsOpen(true); }} style={[s.backupLink, s.footerAction]}><Text style={s.footerLinkText}>View expenses</Text></Pressable><Pressable accessibilityRole="button" disabled={saving || transferring} onPress={() => setBackupOpen(true)} style={[s.backupLink, s.footerAction]}><Text style={s.footerLinkText}>Data & backup</Text></Pressable></View></View>
+
         </>
       )}
-      <Modal visible={appearanceOpen} transparent animationType="slide" onRequestClose={() => { if (!themeBusy) setAppearanceOpen(false); }}>
-        <View style={s.appearanceOverlay}>
+      </>}
+      {page === 'Settings' && (
+        <View style={s.flex}>
+          <View style={s.formHeader}><Text accessibilityRole="header" style={s.sectionTitle}>Settings</Text><Pressable accessibilityRole="button" accessibilityLabel="Close settings" onPress={() => setPage('Home')} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+          <ScrollView contentContainerStyle={s.form}>
+            <Pressable accessibilityRole="button" onPress={() => { setAppearanceOpen(true); }} style={s.settingsRow}><Ionicons accessible={false} importantForAccessibility="no" name="color-palette-outline" size={22} color={theme.link} /><View style={s.rowBody}><Text style={s.rowTitle}>Appearance</Text><Text style={s.rowSubtitle}>{mode === 'dark' ? 'Dark' : 'Light'} mode</Text></View><Ionicons accessible={false} importantForAccessibility="no" name="chevron-forward" size={18} color={theme.muted} /></Pressable>
+            <Pressable accessibilityRole="button" onPress={() => { setBackupOpen(true); }} style={s.settingsRow}><Ionicons accessible={false} importantForAccessibility="no" name="cloud-download-outline" size={22} color={theme.link} /><View style={s.rowBody}><Text style={s.rowTitle}>Data & backup</Text><Text style={s.rowSubtitle}>Export or restore your data</Text></View><Ionicons accessible={false} importantForAccessibility="no" name="chevron-forward" size={18} color={theme.muted} /></Pressable>
+            <Text style={s.backupCopy}>Your expenses and wallet activity are saved on this device.</Text>
+          </ScrollView>
+        </View>
+      )}
+      <PageModal visible={appearanceOpen} onRequestClose={() => { if (!themeBusy) setAppearanceOpen(false); }}>
+        <SafeAreaView style={s.screen}>
           <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
-          <Pressable accessibilityRole="button" accessibilityLabel="Close appearance settings" disabled={themeBusy} onPress={() => setAppearanceOpen(false)} style={StyleSheet.absoluteFill} />
-          <SafeAreaView edges={['bottom']} style={s.appearanceSheet}>
-            <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={s.appearanceContent}>
-              <View style={s.sheetHandle} />
-              <Text accessibilityRole="header" style={s.appearanceTitle}>Appearance</Text>
+          <View style={s.formHeader}><Text accessibilityRole="header" style={s.sectionTitle}>Appearance</Text><Pressable accessibilityRole="button" accessibilityLabel="Close appearance settings" disabled={themeBusy} onPress={() => setAppearanceOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+            <ScrollView contentContainerStyle={s.form}>
               <Text style={s.appearanceSubtitle}>Preview and choose your theme.</Text>
               <View accessibilityRole="radiogroup" accessibilityLabel="Color theme" style={s.themeCards}>
                 {(['light', 'dark'] as const).map((value) => {
@@ -304,13 +386,12 @@ function Tracker() {
               <Text style={s.themeSaveNote}>Your choice is saved automatically.</Text>
               <Pressable accessibilityRole="button" disabled={themeBusy} onPress={() => setAppearanceOpen(false)} style={({ pressed }) => [s.primary, pressed && s.pressed, themeBusy && s.disabled]}><Text style={s.primaryText}>Done</Text></Pressable>
             </ScrollView>
-          </SafeAreaView>
-        </View>
-      </Modal>
-      <Modal visible={detailsOpen} animationType="slide" onRequestClose={() => { if (filterOpen) setFilterOpen(false); else setDetailsOpen(false); }}>
-        <SafeAreaView style={s.screen}>
+        </SafeAreaView>
+      </PageModal>
+      {page === 'Expenses' && (
+        <View style={s.flex}>
           <View style={s.flex} importantForAccessibility={filterOpen ? 'no-hide-descendants' : 'auto'}>
-          <View style={s.formHeader}><Text accessibilityRole="header" style={[s.sectionTitle, s.flex]}>Expense details</Text><Pressable accessibilityRole="button" accessibilityLabel="Close expense details" onPress={() => setDetailsOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
+          <View style={s.formHeader}><Text accessibilityRole="header" style={[s.sectionTitle, s.flex]}>Expense details</Text><Pressable accessibilityRole="button" accessibilityLabel="Close expense details" onPress={() => setPage('Home')} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <FlatList key={JSON.stringify([period, monthKey, categoryFilter])} style={s.flex} data={visible} keyExtractor={(item) => item.id} contentContainerStyle={[s.list, !visible.length && s.emptyList]} showsVerticalScrollIndicator={true}
             ListHeaderComponent={<View style={s.detailsControls}>
               <View style={s.detailsTabs}><View style={s.tabs}>{(['month', 'all'] as const).map((value) => <Pressable key={value} accessibilityRole="tab" accessibilityState={{ selected: period === value }} onPress={() => setPeriod(value)} style={[s.tab, period === value && s.tabActive]}><Text style={[s.tabText, period === value && s.tabTextActive]}>{value === 'month' ? 'Monthly' : 'All time'}</Text></Pressable>)}</View></View>
@@ -326,11 +407,10 @@ function Tracker() {
             ListEmptyComponent={<View style={s.empty}><View style={s.emptyIcon}><Text style={s.emptyIconText}>↗</Text></View><Text style={s.emptyTitle}>{categoryFilter !== null ? 'No matching expenses.' : period === 'month' ? 'No expenses this month.' : 'A fresh start.'}</Text><Text style={s.emptyCopy}>{categoryFilter !== null ? `No spending in ${categoryFilter} ${period === 'month' ? `for ${monthLabel}` : 'yet'}. Try another category or reset the filter.` : period === 'month' && !isCurrentMonth ? `Nothing recorded for ${monthLabel}.` : 'Add an expense to start tracking your spending.'}</Text></View>}
             renderItem={({ item }) => <View style={s.row}>
               <View style={[s.categoryIcon, { backgroundColor: theme.categories[categories.find((name) => name === item.category) ?? 'Other'] }]}><Text style={s.categoryLetter}>{item.category[0]}</Text></View>
-              <View style={s.rowBody}><Text style={s.rowTitle}>{item.title}</Text><View style={s.expenseMeta}><Text style={s.rowSubtitle}>{item.category} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text adjustsFontSizeToFit numberOfLines={1} style={s.rowAmount}>{money(item.cents)}</Text></View></View>
+              <View style={s.rowBody}><Text style={s.rowTitle}>{item.title}</Text><View style={s.expenseMeta}><Text style={s.rowSubtitle}>{item.category}{item.wallet ? ' · Cash wallet' : ''} · {new Date(item.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</Text><Text adjustsFontSizeToFit numberOfLines={1} style={s.rowAmount}>{money(item.cents)}</Text></View></View>
               <Pressable disabled={saving} accessibilityRole="button" accessibilityLabel={`Delete ${item.title}`} hitSlop={4} style={s.delete} onPress={() => remove(item)}><Text style={s.deleteText}>×</Text></Pressable>
             </View>}
           />
-          <View style={s.formFooter}><Pressable accessibilityRole="button" disabled={saving} onPress={startExpense} style={s.primary}><Text style={s.primaryText}>Add expense</Text></Pressable></View>
           </View>
           {filterOpen && <View style={[StyleSheet.absoluteFill, s.appearanceOverlay]} accessibilityViewIsModal>
             <Pressable accessibilityRole="button" accessibilityLabel="Cancel category filter" onPress={() => setFilterOpen(false)} style={StyleSheet.absoluteFill} />
@@ -346,9 +426,18 @@ function Tracker() {
               <View style={s.formFooter}><Pressable accessibilityRole="button" onPress={() => { setCategoryFilter(pendingCategory); setFilterOpen(false); }} style={({ pressed }) => [s.primary, pressed && s.pressed]}><Text style={s.primaryText}>Apply filter</Text></Pressable></View>
             </View>
           </View>}
-        </SafeAreaView>
-      </Modal>
-      <Modal visible={budgetOpen} animationType="slide" onRequestClose={() => { if (!saving) setBudgetOpen(false); }}>
+        </View>
+      )}
+      {page === 'Wallet' && <View style={s.flex}>{walletContent}</View>}
+      <PageModal visible={walletCardOpen} onRequestClose={() => { if (!saving) setWalletCardOpen(false); }}>
+        <SafeAreaView style={s.screen}>{walletContent}</SafeAreaView>
+      </PageModal>
+      {!loading && !loadError && <View style={s.footer} importantForAccessibility={filterOpen ? 'no-hide-descendants' : 'auto'}>
+            <View accessibilityRole="tablist" style={s.bottomNav}>
+              {([{ label: 'Home', icon: 'home-outline', activeIcon: 'home', action: () => setPage('Home') }, { label: 'Expenses', icon: 'list-outline', activeIcon: 'list', action: () => { setPeriod('month'); setPage('Expenses'); } }, { label: 'Add expense', icon: 'add', action: startExpense }, { label: 'Wallet', icon: 'wallet-outline', activeIcon: 'wallet', action: () => { setWalletError(''); setPage('Wallet'); } }, { label: 'Settings', icon: 'settings-outline', activeIcon: 'settings', action: () => setPage('Settings') }] as const).map((tab) => tab.label === 'Add expense' ? <Pressable key={tab.label} accessibilityRole="button" accessibilityLabel="Add expense" accessibilityState={{ disabled: saving || transferring || filterOpen }} disabled={saving || transferring || filterOpen} onPress={startExpense} style={({ pressed }) => [s.navAdd, pressed && s.pressed, (saving || transferring) && s.disabled]}><Ionicons accessible={false} importantForAccessibility="no" name="add" size={38} color={theme.onButton} /></Pressable> : <Pressable key={tab.label} accessibilityLabel={tab.label} accessibilityRole="tab" accessibilityState={{ selected: tab.label === page, disabled: saving || transferring || filterOpen }} disabled={saving || transferring || filterOpen} onPress={() => { Keyboard.dismiss(); tab.action(); }} style={s.navItem}><View style={[s.navIcon, tab.label === page && s.navIconActive]}><Ionicons accessible={false} importantForAccessibility="no" name={tab.label === page ? tab.activeIcon : tab.icon} size={22} color={tab.label === page ? theme.text : theme.muted} /></View><Text style={[s.navLabel, tab.label === page && s.navLabelActive]}>{tab.label}</Text></Pressable>)}
+            </View>
+          </View>}
+      <PageModal visible={budgetOpen} onRequestClose={() => { if (!saving) setBudgetOpen(false); }}>
         <SafeAreaView style={s.screen}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={s.formHeader}><Text style={s.sectionTitle}>Monthly budget</Text><Pressable accessibilityRole="button" accessibilityLabel="Close budget form" disabled={saving} onPress={() => setBudgetOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.form}>
@@ -358,23 +447,23 @@ function Tracker() {
             <View style={s.carryForwardRow}><Text style={[s.sectionTitle, s.flex]}>Carry unused budget to next month</Text><Switch accessibilityLabel="Carry unused budget to next month" value={budgetCarryForward} onValueChange={setBudgetCarryForward} disabled={saving} trackColor={{ true: theme.accent }} /></View>
             <Text style={s.backupCopy}>Only a positive amount left rolls into next month, including any carried funds. Turn this off to stop this month’s carry-forward and recalculate later months. Save budget to apply.</Text>
             {!!budget && <Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget(true)} style={s.backupLink}><Text style={s.overBudget}>Remove this month’s budget</Text></Pressable>}
-          <View style={s.inlineFormFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color={theme.onAccent} /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
+          <View style={s.inlineFormFooter}>{!!budgetError && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{budgetError}</Text>}<Pressable accessibilityRole="button" disabled={saving} onPress={() => saveBudget()} style={s.primary}>{saving ? <ActivityIndicator color={theme.onButton} /> : <Text style={s.primaryText}>Save budget</Text>}</Pressable></View>
           </ScrollView>
         </KeyboardAvoidingView></SafeAreaView>
-      </Modal>
-      <Modal visible={backupOpen} animationType="slide" onRequestClose={() => { if (!transferring) setBackupOpen(false); }}>
+      </PageModal>
+      <PageModal visible={backupOpen} onRequestClose={() => { if (!transferring) setBackupOpen(false); }}>
         <SafeAreaView style={s.screen}>
           <View style={s.formHeader}><Text style={s.sectionTitle}>Data & backup</Text><Pressable accessibilityRole="button" accessibilityLabel="Close backup screen" disabled={transferring} onPress={() => setBackupOpen(false)} style={s.close}><Text style={s.closeText}>×</Text></Pressable></View>
           <ScrollView contentContainerStyle={s.form}>
             <Text style={s.emptyTitle}>Your data, to keep.</Text>
-            <Text style={s.backupCopy}>Back up your expenses, categories, monthly budgets and carry-forward settings as a JSON file, or restore a backup from another device.</Text>
-            <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses and {Object.keys(budgets).length} monthly budgets. All categories are included. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
-            <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). Old expense-only backups also work. New categories, expenses and budgets for new months are added; existing budget amounts are kept.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
+            <Text style={s.backupCopy}>Back up your expenses, categories, monthly budgets, wallet activity and carry-forward settings as a JSON file, or restore a backup from another device.</Text>
+            <View style={s.backupCard}><Text style={s.sectionTitle}>Export backup</Text><Text style={s.backupCopy}>Save all {expenses.length} expenses and {Object.keys(budgets).length} monthly budgets. All categories and wallet activity are included. Choose a folder to keep your backup.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('export')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Export JSON</Text></Pressable></View>
+            <View style={s.backupCard}><Text style={s.sectionTitle}>Import backup</Text><Text style={s.backupCopy}>Choose a Finance Tracker JSON file (up to 5 MB). Old expense-only backups also work. New wallet deposits, categories, expenses and budgets for new months are added; existing budget amounts are kept.</Text><Pressable accessibilityRole="button" disabled={transferring} onPress={() => transfer('import')} style={[s.primary, transferring && s.disabled]}><Text style={s.primaryText}>Import JSON</Text></Pressable></View>
             {transferring && <ActivityIndicator color={theme.accent} accessibilityLabel="Working with backup" />}
             <Text style={s.backupCopy}>Backup files contain your expense details in plain text. Keep them somewhere private. Your data stays on this device unless you export it.</Text>
           </ScrollView>
         </SafeAreaView>
-      </Modal>
+      </PageModal>
       <Modal visible={open} animationType="slide" onRequestClose={() => { if (!saving) { if (managingCategories) setManagingCategories(false); else setOpen(false); } }}>
         <SafeAreaView style={s.screen}><KeyboardAvoidingView style={s.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           {managingCategories ? <>
@@ -402,8 +491,11 @@ function Tracker() {
             <Text style={s.label}>Description</Text><TextInput accessibilityLabel="Expense description" style={s.input} placeholder="What was it for?" placeholderTextColor={theme.placeholder} value={title} onChangeText={setTitle} maxLength={80} editable={!saving} />
             <View style={s.categoryHeading}><Text style={[s.label, { marginBottom: 0 }]}>Category</Text><Pressable accessibilityRole="button" disabled={saving} onPress={() => { setCreatingCategory(false); setManagingCategories(true); }} style={({ pressed }) => [s.manageCategoriesButton, pressed && s.pressed]}><Text style={s.link}>Manage</Text></Pressable></View>
             <View style={s.categoryChoices}>{savedCategories.map((value) => <Pressable key={value} disabled={saving} accessibilityRole="radio" accessibilityState={{ checked: value === category }} onPress={() => setCategory(value)} style={({ pressed }) => [s.chip, category === value && s.chipActive, pressed && s.pressed]}><Text style={[s.chipText, category === value && s.chipTextActive]}>{category === value ? '✓  ' : ''}{value}</Text></Pressable>)}<Pressable accessibilityRole="button" accessibilityLabel="Create category" disabled={saving} onPress={() => { setNewCategory(''); setCategoryError(''); setCreatingCategory(true); setManagingCategories(true); }} style={({ pressed }) => [s.chip, s.newCategoryChip, pressed && s.pressed]}><Text style={s.link}>+ New</Text></Pressable></View>
+            <Text style={[s.label, { marginTop: 28 }]}>Pay from</Text>
+            <View accessibilityRole="radiogroup" accessibilityLabel="Payment source" style={s.categoryChoices}>{[false, true].map((value) => <Pressable key={String(value)} accessibilityRole="radio" accessibilityState={{ checked: payFromWallet === value }} disabled={saving} onPress={() => setPayFromWallet(value)} style={[s.chip, payFromWallet === value && s.chipActive]}><Text style={[s.chipText, payFromWallet === value && s.chipTextActive]}>{value ? 'Cash wallet' : 'Unassigned'}</Text></Pressable>)}</View>
+            {payFromWallet && <Text style={s.backupCopy}>Balance {money(wallet.balance)}. This expense will reduce your wallet balance.</Text>}
             <Text style={[s.label, { marginTop: 28 }]}>Date · YYYY-MM-DD</Text><TextInput accessibilityLabel="Expense date" placeholder="YYYY-MM-DD" placeholderTextColor={theme.placeholder} value={expenseDate} onChangeText={setExpenseDate} editable={!saving} style={s.input} maxLength={10} autoCorrect={false} autoCapitalize="none" />
-          <View style={s.inlineFormFooter}>{!!error && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{error}</Text>}<Pressable disabled={saving} accessibilityRole="button" onPress={add} style={({ pressed }) => [s.primary, pressed && s.pressed, saving && s.disabled]}>{saving ? <ActivityIndicator color={theme.onAccent} /> : <Text style={s.primaryText}>Save expense</Text>}</Pressable></View>
+          <View style={s.inlineFormFooter}>{!!error && <Text accessibilityRole="alert" style={[s.error, { marginTop: 0, marginBottom: 12 }]}>{error}</Text>}<Pressable disabled={saving} accessibilityRole="button" onPress={add} style={({ pressed }) => [s.primary, pressed && s.pressed, saving && s.disabled]}>{saving ? <ActivityIndicator color={theme.onButton} /> : <Text style={s.primaryText}>Save expense</Text>}</Pressable></View>
           </ScrollView>
           </>}
         </KeyboardAvoidingView></SafeAreaView>
@@ -415,6 +507,26 @@ function Tracker() {
 export default function App() { return <SafeAreaProvider><Tracker /></SafeAreaProvider>; }
 
 const createStyles = (theme: Theme) => StyleSheet.create({
+  overviewMonth: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  calendarBadge: { width: 28, height: 28, borderRadius: 8, backgroundColor: theme.summaryControl, alignItems: 'center', justifyContent: 'center' },
+  spendingRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingTop: 6, paddingBottom: 16 },
+  spendingIllustration: { width: 100, height: 96 },
+  overviewArrow: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  walletIcon: { width: 40, height: 40, borderRadius: 13, backgroundColor: theme.selected, alignItems: 'center', justifyContent: 'center' },
+  walletTitle: { color: theme.text, fontSize: 14, fontWeight: '600' },
+  walletCaption: { color: theme.summaryMuted, fontSize: 11, marginTop: 4 },
+  overviewEmpty: { flex: 1, minHeight: 132, justifyContent: 'center', alignItems: 'center', paddingVertical: 16 },
+  overviewEmptyTitle: { color: theme.text, fontSize: 14, marginTop: 12 },
+  bottomNav: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: theme.border, paddingTop: 12, paddingBottom: 6 },
+  navAdd: { width: 52, height: 52, borderRadius: 26, backgroundColor: theme.button, alignItems: 'center', justifyContent: 'center', marginHorizontal: 6 },
+  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 6, minHeight: 56 },
+  navIcon: { width: 48, height: 32, borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: 'transparent', alignItems: 'center', justifyContent: 'center' },
+  navIconActive: { backgroundColor: theme.selected },
+  navLabel: { color: theme.muted, fontSize: 10 },
+  navLabelActive: { color: theme.text, fontWeight: '700' },
+  settingsRow: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, backgroundColor: theme.surface, borderRadius: 18, marginBottom: 12, minHeight: 76 },
+  walletCard: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 80, marginHorizontal: 20, marginTop: 12, padding: 16, backgroundColor: theme.summary, borderWidth: 1, borderColor: theme.summaryBorder, borderRadius: 18 },
+  walletBalance: { fontSize: 22, fontWeight: '700', color: theme.summaryText, maxWidth: '40%', flexShrink: 1, textAlign: 'right' },
   filterLabel: { color: theme.text, fontSize: 13, fontWeight: '600', marginTop: 20, marginBottom: 12 },
   categoryFilterButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 52, paddingHorizontal: 16, paddingVertical: 12, marginTop: 18, borderWidth: 1, borderColor: theme.border, borderRadius: 16, backgroundColor: theme.surface },
   categoryFilterActive: { borderColor: theme.selectedBorder },
@@ -469,32 +581,32 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   themeSaveNote: { color: theme.muted, fontSize: 12, textAlign: 'center', marginVertical: 20 },
   inlineFormFooter: { paddingTop: 12, paddingBottom: 8 },
   expenseMeta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 6 },
-  headerText: { flex: 1, minWidth: 0 }, footerAction: { flex: 1 }, footerLinkText: { color: theme.accent, fontWeight: '600', textAlign: 'center' },
+  headerText: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }, footerAction: { flex: 1 }, footerLinkText: { color: theme.accent, fontWeight: '600', textAlign: 'center' },
   carryForwardRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 16, minHeight: 48 },
-  recentSpace: { flex: 1, minHeight: 0, marginHorizontal: 24, overflow: 'hidden' },
-  recentHeader: { justifyContent: 'center', paddingTop: 12 },
+  recentSpace: { flex: 1, minHeight: 180, marginHorizontal: 20, overflow: 'hidden' },
+  recentHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 8 },
   recentRow: { flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: 1, borderBottomColor: theme.divider },
   recentIcon: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   recentTitle: { fontSize: 15, lineHeight: 22, fontWeight: '500', color: theme.text },
   recentMeta: { fontSize: 11, lineHeight: 18, color: theme.muted },
   recentAmount: { maxWidth: '40%', fontSize: 14, fontWeight: '600', color: theme.text },
   overviewContent: { flexGrow: 1, paddingBottom: 12 }, footerLinks: { flexDirection: 'row', justifyContent: 'space-between', gap: 16 }, detailsControls: { paddingTop: 4, paddingBottom: 12 }, detailsTabs: { alignItems: 'flex-start', marginBottom: 22 }, detailsTotalRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingTop: 18, paddingBottom: 8 }, detailsTotal: { color: theme.summaryText, fontSize: 28, fontWeight: '600', flexShrink: 1 },
-  spentLabel: { color: theme.summaryMuted, fontSize: 12, marginTop: 12 }, budgetSection: { borderTopWidth: 1, borderTopColor: theme.summaryBorder, marginTop: 16, paddingTop: 4 }, budgetButton: { minHeight: 44, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, budgetLabel: { flex: 1, fontSize: 13, color: theme.summaryText, fontWeight: '500' }, budgetEdit: { color: theme.summaryText, fontWeight: '600', fontSize: 13 }, progressTrack: { height: 6, borderRadius: 3, backgroundColor: theme.summaryBorder, overflow: 'hidden', marginTop: 3 }, progressFill: { height: 6, borderRadius: 3 }, budgetStats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 11 }, budgetStat: { fontSize: 12, color: theme.summaryMuted }, budgetRemaining: { fontSize: 13, color: theme.summaryText, fontWeight: '600' }, overBudget: { color: theme.danger, fontWeight: '600' },
+  spentLabel: { color: theme.summaryMuted, fontSize: 11 }, budgetSection: { borderTopWidth: 1, borderTopColor: theme.summaryBorder, paddingTop: 2 }, budgetButton: { minHeight: 44, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, budgetLabel: { flex: 1, fontSize: 13, color: theme.summaryText, fontWeight: '500' }, budgetAction: { flexDirection: 'row', alignItems: 'center', gap: 3 }, budgetEdit: { color: theme.link, fontWeight: '600', fontSize: 12 }, progressTrack: { height: 9, borderRadius: 5, backgroundColor: theme.summaryControl, overflow: 'hidden', borderWidth: 1, borderColor: theme.summaryBorder }, progressFill: { height: '100%', borderRadius: 4 }, budgetStats: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, marginTop: 8 }, budgetStat: { fontSize: 11, color: theme.summaryMuted }, budgetRemaining: { fontSize: 11, color: theme.summaryMuted }, overBudget: { color: theme.danger, fontWeight: '600' },
   backupLink: { minHeight: 44, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, backupCopy: { color: theme.muted, fontSize: 14, lineHeight: 22, marginVertical: 14 }, backupCard: { borderWidth: 1, borderColor: theme.border, borderRadius: 20, padding: 20, marginVertical: 10 },
   flex: { flex: 1 }, screen: { flex: 1, backgroundColor: theme.background },
-  header: { paddingHorizontal: 24, paddingTop: 24, paddingBottom: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 1.5, color: theme.muted }, heading: { fontSize: 32, fontWeight: '600', letterSpacing: -1.2, color: theme.text, marginTop: 9 },
+  header: { paddingHorizontal: 28, paddingTop: 16, paddingBottom: 24, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  eyebrow: { fontSize: 11, fontWeight: '400', letterSpacing: 0, color: theme.muted }, heading: { fontSize: 29, fontWeight: '600', letterSpacing: -0.5, color: theme.text },
   logo: { width: 44, height: 44, borderRadius: 14 },
-  summary: { backgroundColor: theme.summary, marginHorizontal: 24, padding: 24, borderRadius: 24 }, summaryLabel: { color: theme.summaryMuted, fontSize: 14 },
+  summary: { backgroundColor: theme.summary, marginHorizontal: 20, padding: 16, borderRadius: 20, borderWidth: 1, borderColor: theme.summaryBorder }, summaryLabel: { color: theme.summaryMuted, fontSize: 14 },
   monthNavigation: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: -8, marginHorizontal: 0 }, monthLabel: { flex: 1, textAlign: 'center', color: theme.summaryMuted, fontSize: 15, fontWeight: '500' }, monthArrow: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22, backgroundColor: theme.summaryControl }, monthArrowText: { color: theme.summaryText, fontSize: 29, lineHeight: 32 }, currentMonthButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 8 }, currentMonthText: { color: theme.link, fontSize: 12, fontWeight: '600', textDecorationLine: 'underline' },
-  total: { color: theme.summaryText, fontSize: 44, fontWeight: '600', letterSpacing: -1.8, marginTop: 14, marginBottom: 25 },
-  summaryBottom: { flexDirection: 'row', alignItems: 'center', gap: 7 }, dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: theme.progress }, summaryFoot: { color: theme.summaryMuted, fontSize: 12 },
+  total: { color: theme.summaryText, fontSize: 34, fontWeight: '700', letterSpacing: -0.8, marginTop: 2, marginBottom: 4 },
+  summaryBottom: { alignSelf: 'flex-start', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, backgroundColor: theme.summaryControl }, dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: theme.progress }, summaryFoot: { color: theme.summaryMuted, fontSize: 10 },
   sectionTitle: { fontSize: 19, fontWeight: '600', color: theme.text },
   tabs: { flexDirection: 'row', backgroundColor: theme.surface, borderRadius: 20, padding: 3 }, tab: { paddingHorizontal: 12, minHeight: 44, justifyContent: 'center', borderRadius: 18 }, tabActive: { backgroundColor: theme.activeTab }, tabText: { fontSize: 12, color: theme.muted }, tabTextActive: { color: theme.text, fontWeight: '600' },
   list: { paddingHorizontal: 24, paddingBottom: 12 }, emptyList: { flexGrow: 1 }, row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 17, borderBottomWidth: 1, borderBottomColor: theme.divider, gap: 10 },
   categoryIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, categoryLetter: { fontSize: 16, fontWeight: '600', color: theme.categoryText }, rowBody: { flex: 1 }, rowTitle: { fontSize: 15, fontWeight: '500', color: theme.text }, rowSubtitle: { fontSize: 11, color: theme.muted }, rowAmount: { fontSize: 14, fontWeight: '600', color: theme.text, flexShrink: 1 }, delete: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }, deleteText: { fontSize: 23, color: theme.muted },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 }, empty: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 30 }, emptyIcon: { width: 62, height: 62, backgroundColor: theme.surface, borderRadius: 31, justifyContent: 'center', alignItems: 'center', marginBottom: 19 }, emptyIconText: { fontSize: 27, color: theme.muted }, emptyTitle: { fontSize: 20, fontWeight: '500', color: theme.text }, emptyCopy: { color: theme.muted, fontSize: 14, lineHeight: 22, textAlign: 'center', marginTop: 9 },
-  footer: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16 }, primary: { backgroundColor: theme.accent, borderRadius: 18, minHeight: 58, paddingVertical: 16, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 }, primaryText: { color: theme.onAccent, fontSize: 16, fontWeight: '600' }, plus: { color: theme.onAccent, fontSize: 25, lineHeight: 26, fontWeight: '300' }, pressed: { opacity: 0.8 }, disabled: { opacity: 0.6 }, localNote: { textAlign: 'center', color: theme.muted, fontSize: 10, marginTop: 15 },
+  footer: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 0 }, primary: { backgroundColor: theme.button, borderRadius: 28, minHeight: 48, paddingVertical: 12, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 }, primaryText: { color: theme.onButton, fontSize: 14, fontWeight: '600' }, plus: { color: theme.onAccent, fontSize: 25, lineHeight: 26, fontWeight: '300' }, pressed: { opacity: 0.8 }, disabled: { opacity: 0.6 }, localNote: { textAlign: 'center', color: theme.muted, fontSize: 10, marginTop: 15 },
   formHeader: { paddingHorizontal: 24, paddingTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, close: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surface, borderRadius: 22 }, closeText: { fontSize: 27, color: theme.muted }, form: { paddingHorizontal: 28, paddingTop: 44, paddingBottom: 28 }, amountEntry: { flexDirection: 'row', alignItems: 'center', marginTop: 14, marginBottom: 36 }, currency: { fontSize: 38, color: theme.muted, marginRight: 10 }, amountInput: { flex: 1, color: theme.accent, fontSize: 48, fontWeight: '500', paddingVertical: 8 }, label: { fontSize: 13, fontWeight: '600', color: theme.text, marginBottom: 12 }, input: { backgroundColor: theme.surface, borderRadius: 14, paddingHorizontal: 17, paddingVertical: 17, fontSize: 16, color: theme.accent, marginBottom: 30 }, categoryChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, chip: { borderWidth: 1, borderColor: theme.border, borderRadius: 24, minHeight: 44, paddingHorizontal: 17, justifyContent: 'center' }, chipActive: { backgroundColor: theme.selected, borderColor: theme.selectedBorder }, chipText: { color: theme.muted, fontSize: 13 }, chipTextActive: { color: theme.text, fontWeight: '600' }, dateNote: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: theme.border, marginTop: 32, paddingTop: 23 }, muted: { color: theme.muted, fontSize: 13 }, dateText: { color: theme.muted, fontSize: 13 }, formFooter: { padding: 24 }, error: { marginTop: 24, color: theme.danger, lineHeight: 21, fontSize: 13 }, retry: { padding: 16 }, link: { color: theme.accent, fontWeight: '600' },
 });
 

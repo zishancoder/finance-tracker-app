@@ -28,7 +28,7 @@ assert.deepEqual(importBackup(exportBackup([]), expenses).expenses, expenses);
 assert.throws(() => importBackup('{', expenses));
 assert.throws(() => importBackup('null', expenses));
 assert.throws(() => importBackup(' '.repeat(MAX_BACKUP_SIZE + 1), expenses));
-for (const change of [{ version: 5 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
+for (const change of [{ version: 6 }, { currency: 'USD' }, { expenses: [{ ...expenses[0], cents: -1 }] }, { expenses: [{ ...expenses[0], category: 'Bad' }] }, { expenses: [{ ...expenses[0], date: '2026-02-30T00:00:00.000Z' }] }, { expenses: [{ ...expenses[0], title: 'a'.repeat(81) }] }]) {
   assert.throws(() => importBackup(JSON.stringify({ ...JSON.parse(exportBackup(expenses)), ...change }), expenses));
 }
 assert.throws(() => importBackup(exportBackup([{ ...expenses[0], cents: 999 }]), expenses));
@@ -77,7 +77,7 @@ for (const theme of Object.values(themes)) {
   for (const [foreground, background] of [
     ['text', 'background'], ['muted', 'background'], ['text', 'surface'], ['muted', 'surface'],
     ['placeholder', 'surface'], ['onAccent', 'accent'], ['summaryText', 'summary'], ['summaryMuted', 'summary'],
-    ['danger', 'background'], ['danger', 'summary'], ['text', 'activeTab'], ['text', 'selected'],
+    ['onButton', 'button'], ['danger', 'background'], ['danger', 'summary'], ['text', 'activeTab'], ['text', 'selected'],
   ]) assert.ok(contrast(theme[foreground], theme[background]) >= 4.5, `${foreground} on ${background} must remain readable`);
   for (const background of Object.values(theme.categories)) assert.ok(contrast(theme.categoryText, background) >= 4.5);
 }
@@ -167,3 +167,29 @@ assert.throws(() => monthlyBudget([], hugeBudgets, ['2026-12'], '2027-01'));
 assert.throws(() => readTrackerData(JSON.stringify({ ...rolloverData, expenses: [], budgets: hugeBudgets, carryForwardMonths: ['2026-12'] })));
 assert.throws(() => importBackup(exportBackup([], hugeBudgets, categories, ['2026-12']), []));
 console.log('Carry-forward handles opt-in/out, cumulative balances, local year boundaries, missing budgets, backdated changes, overspending, backups, and safe integer limits.');
+
+const { walletSummary, readWalletDeposits } = await import('./expenses.ts');
+const deposit = { id: 'cash-1', title: 'Opening cash', cents: 5000, date: expenses[0].date };
+const cashExpense = { ...expenses[0], wallet: true };
+assert.deepEqual(walletSummary(expenses, []), { added: 0, spent: 0, balance: 0 });
+assert.deepEqual(walletSummary([cashExpense, expenses[1]], [deposit]), { added: 5000, spent: 1230, balance: 3770 });
+assert.equal(walletSummary([], [deposit]).balance, 5000);
+assert.equal(walletSummary([cashExpense], []).balance, -1230);
+assert.deepEqual(readWalletDeposits([deposit]), [deposit]);
+for (const value of [null, {}, [deposit, deposit], [{ ...deposit, cents: -1 }], [{ ...deposit, cents: 1.5 }], [{ ...deposit, title: '' }], [{ ...deposit, date: 'bad' }]]) assert.throws(() => readWalletDeposits(value));
+assert.throws(() => walletSummary([], [{ ...deposit, cents: Number.MAX_SAFE_INTEGER }, deposit]));
+assert.throws(() => readExpenses(JSON.stringify([{ ...cashExpense, wallet: 'yes' }])));
+assert.equal(readExpenses(JSON.stringify([cashExpense]))[0].wallet, true);
+const walletData = { expenses: [cashExpense], budgets: {}, categories: [...categories], walletDeposits: [deposit] };
+assert.deepEqual(readTrackerData(JSON.stringify(walletData)), walletData);
+const cashBackup = exportBackup([cashExpense], {}, categories, [], [deposit]);
+assert.deepEqual(importBackup(cashBackup, []), walletData);
+assert.deepEqual(importBackup(cashBackup, [cashExpense], {}, categories, [], [deposit]), walletData);
+assert.throws(() => importBackup(cashBackup, expenses));
+assert.throws(() => importBackup(cashBackup, [], {}, categories, [], [{ ...deposit, cents: 1 }]));
+assert.deepEqual(importBackup(exportBackup(expenses), [], {}, categories, [], [deposit]).walletDeposits, [deposit]);
+assert.deepEqual(importBackup(JSON.stringify({ app: 'finance-tracker', version: 4, currency: 'INR', expenses, budgets: {}, categories, carryForwardMonths: [] }), [], {}, categories, [], [deposit]).walletDeposits, [deposit]);
+assert.equal(deleteCategory(walletData, 'Food').expenses[0].wallet, true);
+assert.deepEqual(deleteCategory(walletData, 'Food').walletDeposits, [deposit]);
+assert.equal(walletSummary([cashExpense], [deposit, { ...deposit, id: 'cash-2', cents: 100 }]).balance, 3870);
+console.log('Wallet balances, unassigned history, deletions, invalid data, overflow, category changes, and backup round-trip/merge/conflicts passed.');

@@ -11,9 +11,10 @@ export function parseExpenseDate(value: string): Date | null {
 
 export const categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Other'] as const;
 export type Category = string;
-export type Expense = { id: string; title: string; cents: number; category: Category; date: string };
+export type Expense = { id: string; title: string; cents: number; category: Category; date: string; wallet?: boolean };
 export type Budgets = Record<string, number>;
-export type TrackerData = { expenses: Expense[]; budgets: Budgets; categories: string[]; carryForwardMonths?: string[] };
+export type WalletDeposit = { id: string; title: string; cents: number; date: string };
+export type TrackerData = { expenses: Expense[]; budgets: Budgets; categories: string[]; carryForwardMonths?: string[]; walletDeposits?: WalletDeposit[] };
 
 export function categoryName(value: string, existing: readonly string[]): string {
   const name = value.trim();
@@ -56,6 +57,9 @@ export function readTrackerData(text: string): TrackerData {
   const result: TrackerData = { expenses: readExpenses(JSON.stringify(data.expenses), savedCategories), budgets: readBudgets(data.budgets), categories: savedCategories };
   const carryForwardMonths = readCarryForwardMonths(data.carryForwardMonths, result.budgets);
   if (carryForwardMonths.length) result.carryForwardMonths = carryForwardMonths;
+  const deposits = readWalletDeposits(data.walletDeposits);
+  if (deposits.length) result.walletDeposits = deposits;
+  walletSummary(result.expenses, deposits);
   monthlyBudget(result.expenses, result.budgets, carryForwardMonths, '9999-12');
   return result;
 }
@@ -113,27 +117,49 @@ export function readExpenses(value: string | null, allowedCategories: readonly s
   if (!Array.isArray(data) || !data.every((item) =>
     item && typeof item.id === 'string' && item.id.length > 0 && item.id.length <= 128 && typeof item.title === 'string' &&
     item.title.trim().length > 0 && item.title.length <= 80 && Number.isSafeInteger(item.cents) && item.cents > 0 &&
-    allowedCategories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date)) && new Date(item.date).toISOString() === item.date
+    (item.wallet === undefined || typeof item.wallet === 'boolean') && allowedCategories.includes(item.category) && typeof item.date === 'string' && Number.isFinite(Date.parse(item.date)) && new Date(item.date).toISOString() === item.date
   ) || new Set(data.map((item) => item.id)).size !== data.length) throw new Error('Invalid saved expenses');
   expenseTotal(data);
-  return data.map(({ id, title, cents, category, date }) => ({ id, title, cents, category, date }));
+  return data.map(({ id, title, cents, category, date, wallet }) => ({ id, title, cents, category, date, ...(wallet ? { wallet: true } : {}) }));
+}
+
+export function readWalletDeposits(value: unknown): WalletDeposit[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Invalid wallet deposits');
+  return readExpenses(JSON.stringify(value.map((item) => ({ ...item, category: 'Other' }))))
+    .map(({ id, title, cents, date }) => ({ id, title, cents, date }));
+}
+
+export function walletSummary(expenses: Expense[], deposits: WalletDeposit[]) {
+  const added = deposits.reduce((sum, item) => sum + item.cents, 0);
+  if (!Number.isSafeInteger(added) || added < 0) throw new Error('Wallet total is too large');
+  const spent = expenseTotal(expenses.filter((item) => item.wallet));
+  return { added, spent, balance: added - spent };
 }
 
 export const MAX_BACKUP_SIZE = 5 * 1024 * 1024;
 
-export function exportBackup(expenses: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = []): string {
-  const backup = JSON.stringify({ app: 'finance-tracker', version: 4, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets, categories: savedCategories, carryForwardMonths }, null, 2);
+export function exportBackup(expenses: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = [], walletDeposits: WalletDeposit[] = []): string {
+  const backup = JSON.stringify({ app: 'finance-tracker', version: 5, currency: 'INR', exportedAt: new Date().toISOString(), expenses, budgets, categories: savedCategories, carryForwardMonths, walletDeposits }, null, 2);
   if (new TextEncoder().encode(backup).length > MAX_BACKUP_SIZE) throw new Error('Backups can be up to 5 MB.');
   return backup;
 }
 
-export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = []): TrackerData {
+export function importBackup(text: string, existing: Expense[], budgets: Budgets = {}, savedCategories: readonly string[] = categories, carryForwardMonths: readonly string[] = [], walletDeposits: WalletDeposit[] = []): TrackerData {
   if (text.length > MAX_BACKUP_SIZE) throw new Error('Choose a backup smaller than 5 MB.');
   let backup;
   try { backup = JSON.parse(text); } catch { throw new Error('This file is not valid JSON.'); }
-  if (!backup || backup.app !== 'finance-tracker' || ![1, 2, 3, 4].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
-    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1, 2, 3 or 4).');
+  if (!backup || backup.app !== 'finance-tracker' || ![1, 2, 3, 4, 5].includes(backup.version) || backup.currency !== 'INR' || !Array.isArray(backup.expenses)) {
+    throw new Error('Choose a Finance Tracker JSON backup in INR (version 1, 2, 3, 4 or 5).');
   }
+  const incomingDeposits = backup.version >= 5 ? readWalletDeposits(backup.walletDeposits) : [];
+  const mergedDeposits = new Map(walletDeposits.map((item) => [item.id, item]));
+  for (const item of incomingDeposits) {
+    const previous = mergedDeposits.get(item.id);
+    if (previous && (['title', 'cents', 'date'] as const).some((key) => previous[key] !== item[key])) throw new Error('A wallet deposit conflicts with an existing entry. Nothing was imported.');
+    mergedDeposits.set(item.id, item);
+  }
+  const deposits = [...mergedDeposits.values()];
   const incomingBudgets = backup.version >= 2 ? readBudgets(backup.budgets) : {};
   const incomingCategories = backup.version >= 3 ? readCategories(backup.categories) : [...categories];
   const incomingCarry = backup.version >= 4 ? readCarryForwardMonths(backup.carryForwardMonths, incomingBudgets) : [];
@@ -147,17 +173,18 @@ export function importBackup(text: string, existing: Expense[], budgets: Budgets
   const merged = new Map(existing.map((item) => [item.id, item]));
   for (const item of incoming) {
     const previous = merged.get(item.id);
-    if (previous && (['title', 'cents', 'category', 'date'] as const).some((key) => previous[key] !== item[key])) {
+    if (previous && (['title', 'cents', 'category', 'date', 'wallet'] as const).some((key) => previous[key] !== item[key])) {
       throw new Error('A backup expense conflicts with an existing expense. Nothing was imported.');
     }
     merged.set(item.id, item);
   }
   const result = [...merged.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   expenseTotal(result);
+  walletSummary(result, deposits);
   const mergedBudgets = { ...incomingBudgets, ...budgets };
   const mergedCarry = [...carryForwardMonths, ...incomingCarry.filter((month) => !Object.hasOwn(budgets, month))];
   monthlyBudget(result, mergedBudgets, mergedCarry, '9999-12');
-  return { expenses: result, budgets: mergedBudgets, categories: mergedCategories, ...(mergedCarry.length ? { carryForwardMonths: mergedCarry } : {}) };
+  return { expenses: result, budgets: mergedBudgets, categories: mergedCategories, ...(mergedCarry.length ? { carryForwardMonths: mergedCarry } : {}), ...(deposits.length ? { walletDeposits: deposits } : {}) };
 }
 
 export function expensesForMonth(expenses: Expense[], month: Date): Expense[] {
